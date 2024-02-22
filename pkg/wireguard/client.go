@@ -10,12 +10,11 @@ import (
 	"strings"
 	"time"
 
-	prometheus "github.com/prometheus/client_golang/prometheus"
-
+	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 )
 
-// Client структура для взаимодействия с OPNsense API
+// Client represents a client for interacting with the OPNsense API.
 type Client struct {
 	BaseURL    string
 	APIKey     string
@@ -23,67 +22,51 @@ type Client struct {
 	HTTPClient *http.Client
 }
 
-// Определим метрику Prometheus для количества доступных обновлений
+// Define Prometheus metrics for monitoring various statuses and configurations.
 var (
-	needsRebootMetric = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "opnsense_firmware_needs_reboot",
-		Help: "Indicates if a reboot is required after firmware updates",
-	})
-	connectionStatusMetric = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "opnsense_firmware_connection_status",
-		Help: "Status of the connection to the firmware repository",
-	}, []string{"status"})
-	repositoryStatusMetric = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "opnsense_firmware_repository_status",
-		Help: "Status of the firmware repository",
-	}, []string{"status"})
-	productVersionMetric = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "opnsense_product_version_info",
-		Help: "The current version of the OPNsense product",
-	}, []string{"version"})
-	wgPeerLastHandshakeMetric = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "wireguard_peer_last_handshake_seconds",
-		Help: "Last handshake time with the peer as UNIX timestamp.",
-	}, []string{"interface", "peer_name", "public_key"})
-
-	wgPeerStatusMetric = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "wireguard_peer_status",
-		Help: "Status of the WireGuard peer (enabled/disabled).",
-	}, []string{"interface", "peer_name", "public_key"})
-	wgTotalPeersMetric = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "wireguard_total_peers",
-		Help: "Total number of WireGuard peers.",
-	})
-	wgInterfaceInfoMetric = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "wireguard_interface_info",
-		Help: "Information about the WireGuard interface.",
-	}, []string{"interface", "public_key", "listening_port"})
-
-	wgPeerTransferMetric = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "wireguard_peer_transfer_bytes",
-		Help: "Number of bytes transferred to and from the peer.",
-	}, []string{"interface", "peer_public_key", "direction"}) // direction can be "received" or "sent"
+	// Metrics related to firmware status.
+	needsRebootMetric      = newGauge("opnsense_firmware_needs_reboot", "Indicates if a reboot is required after firmware updates")
+	connectionStatusMetric = newGaugeVec("opnsense_firmware_connection_status", "Status of the connection to the firmware repository", "status")
+	repositoryStatusMetric = newGaugeVec("opnsense_firmware_repository_status", "Status of the firmware repository", "status")
+	productVersionMetric   = newGaugeVec("opnsense_product_version_info", "The current version of the OPNsense product", "version")
+	// Metrics related to WireGuard.
+	wgPeerLastHandshakeMetric = newGaugeVec("wireguard_peer_last_handshake_seconds", "Last handshake time with the peer as UNIX timestamp.", "interface", "peer_name", "public_key")
+	wgPeerStatusMetric        = newGaugeVec("wireguard_peer_status", "Status of the WireGuard peer (enabled/disabled).", "interface", "peer_name", "public_key")
+	wgTotalPeersMetric        = newGauge("wireguard_total_peers", "Total number of WireGuard peers.")
+	wgInterfaceInfoMetric     = newGaugeVec("wireguard_interface_info", "Information about the WireGuard interface.", "interface", "public_key", "listening_port")
+	wgPeerTransferMetric      = newGaugeVec("wireguard_peer_transfer_bytes", "Number of bytes transferred to and from the peer.", "interface", "peer_public_key", "direction") // "direction" can be "received" or "sent"
 )
 
-func init() {
-	// Регистрация новых метрик в Prometheus
-	prometheus.MustRegister(needsRebootMetric)
-	prometheus.MustRegister(connectionStatusMetric)
-	prometheus.MustRegister(repositoryStatusMetric)
-	prometheus.MustRegister(productVersionMetric)
-	prometheus.MustRegister(wgPeerLastHandshakeMetric)
-	prometheus.MustRegister(wgPeerStatusMetric)
-	prometheus.MustRegister(wgTotalPeersMetric)
-	prometheus.MustRegister(wgInterfaceInfoMetric)
-	prometheus.MustRegister(wgPeerTransferMetric)
+// newGauge creates a new prometheus.Gauge and returns it.
+func newGauge(name, help string) prometheus.Gauge {
+	return prometheus.NewGauge(prometheus.GaugeOpts{Name: name, Help: help})
+}
 
-	// Настройка logrus
+// newGaugeVec creates a new prometheus.GaugeVec and returns it.
+func newGaugeVec(name, help string, labels ...string) *prometheus.GaugeVec {
+	return prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: name, Help: help}, labels)
+}
+
+func init() {
+	// Register new metrics with Prometheus.
+	prometheus.MustRegister(
+		needsRebootMetric,
+		connectionStatusMetric,
+		repositoryStatusMetric,
+		productVersionMetric,
+		wgPeerLastHandshakeMetric,
+		wgPeerStatusMetric,
+		wgTotalPeersMetric,
+		wgInterfaceInfoMetric,
+		wgPeerTransferMetric,
+	)
+
+	// Configure logrus logging.
 	log.SetFormatter(&log.TextFormatter{
 		FullTimestamp: true,
 		ForceColors:   true,
 	})
 	log.SetLevel(log.InfoLevel)
-
 }
 
 // FetchWireGuardConfig fetches the WireGuard configuration from the endpoint
