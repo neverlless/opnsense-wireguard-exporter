@@ -4,7 +4,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,6 +12,11 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
+)
+
+const (
+	timeLayout               = "2006-01-02 15:04:05-07:00" // Time layout for parsing timestamps
+	defaultHTTPClientTimeout = 10 * time.Second            // HTTP client timeout duration
 )
 
 // Client represents a client for interacting with the OPNsense API.
@@ -24,12 +29,13 @@ type Client struct {
 
 // Define Prometheus metrics for monitoring various statuses and configurations.
 var (
-	// Metrics related to firmware status.
+	// Firmware-related metrics.
 	needsRebootMetric      = newGauge("opnsense_firmware_needs_reboot", "Indicates if a reboot is required after firmware updates")
 	connectionStatusMetric = newGaugeVec("opnsense_firmware_connection_status", "Status of the connection to the firmware repository", "status")
 	repositoryStatusMetric = newGaugeVec("opnsense_firmware_repository_status", "Status of the firmware repository", "status")
 	productVersionMetric   = newGaugeVec("opnsense_product_version_info", "The current version of the OPNsense product", "version")
-	// Metrics related to WireGuard.
+
+	// WireGuard-related metrics.
 	wgPeerLastHandshakeMetric = newGaugeVec("wireguard_peer_last_handshake_seconds", "Last handshake time with the peer as UNIX timestamp.", "interface", "peer_name", "public_key")
 	wgPeerStatusMetric        = newGaugeVec("wireguard_peer_status", "Status of the WireGuard peer (enabled/disabled).", "interface", "peer_name", "public_key")
 	wgTotalPeersMetric        = newGauge("wireguard_total_peers", "Total number of WireGuard peers.")
@@ -61,7 +67,7 @@ func init() {
 		wgPeerTransferMetric,
 	)
 
-	// Configure logrus logging.
+	// Configure logging with logrus.
 	log.SetFormatter(&log.TextFormatter{
 		FullTimestamp: true,
 		ForceColors:   true,
@@ -69,113 +75,54 @@ func init() {
 	log.SetLevel(log.InfoLevel)
 }
 
-// FetchWireGuardConfig fetches the WireGuard configuration from the endpoint
+// FetchWireGuardConfig fetches the WireGuard configuration from the endpoint and updates relevant metrics.
 func (c *Client) FetchWireGuardConfig() error {
 	log.Println("Fetching WireGuard configuration...")
+
 	body, err := c.fetch("/api/wireguard/service/showconf")
 	if err != nil {
-		log.Printf("Error fetching WireGuard configuration: %v\n", err)
+		log.Errorf("Error fetching WireGuard configuration: %v", err)
 		return err
 	}
 
 	interfaces, peers, err := parseWireGuardConfig(body)
 	if err != nil {
-		log.Printf("Failed to parse WireGuard config: %v\n", err)
+		log.Errorf("Failed to parse WireGuard config: %v", err)
 		return fmt.Errorf("failed to parse WireGuard config: %v", err)
 	}
 
 	log.Println("Updating WireGuard metrics...")
-	for _, intf := range interfaces {
-		wgInterfaceInfoMetric.WithLabelValues(
-			intf.Name,
-			intf.PublicKey,
-			intf.ListeningPort,
-		).Set(1) // Используем WithLabelValues вместо With
-	}
-
-	for _, peer := range peers {
-		wgPeerTransferMetric.WithLabelValues(
-			peer.Interface,
-			peer.PublicKey,
-			"received",
-		).Set(float64(peer.TransferReceived))
-
-		wgPeerTransferMetric.WithLabelValues(
-			peer.Interface,
-			peer.PublicKey,
-			"sent",
-		).Set(float64(peer.TransferSent))
-	}
-
+	updateWireGuardMetrics(interfaces, peers)
 	log.Println("WireGuard metrics updated successfully.")
+
 	return nil
 }
 
-// UpdateMetrics обновляет метрики, получая статусы прошивки и WireGuard
+// UpdateMetrics updates firmware and WireGuard-related metrics by interfacing with the OPNsense API.
 func (c *Client) UpdateMetrics() error {
 	firmwareStatus, err := c.FetchFirmwareStatus()
 	if err != nil {
 		return err
 	}
 
-	// Устанавливаем значения для новых метрик
-	needsReboot, _ := strconv.ParseFloat(firmwareStatus.NeedsReboot, 64)
-	needsRebootMetric.Set(needsReboot)
-
-	connectionStatusMetric.With(prometheus.Labels{"status": firmwareStatus.Connection}).Set(1)
-	repositoryStatusMetric.With(prometheus.Labels{"status": firmwareStatus.Repository}).Set(1)
-
-	productVersionMetric.With(prometheus.Labels{"version": firmwareStatus.ProductVersion}).Set(1) // Установка версии продукта
+	updateFirmwareMetrics(firmwareStatus)
 
 	wgStatus, err := c.FetchWireGuardStatus()
 	if err != nil {
 		return err
 	}
 
-	totalPeers := 0 // Initialize a counter for the total number of peers
+	totalPeers := updateWireGuardStatusMetrics(wgStatus)
 
-	for _, wg := range wgStatus.Items {
-		for _, peer := range wg.Peers {
-			if peer.LastHandshake != "0000-00-00 00:00:00+00:00" {
-				lastHandshakeTime, err := time.Parse("2006-01-02 15:04:05-07:00", peer.LastHandshake)
-				if err != nil {
-					log.WithError(err).Error("Failed to parse last handshake time")
-					continue
-				}
-				wgPeerLastHandshakeMetric.With(prometheus.Labels{
-					"interface":  wg.Interface,
-					"peer_name":  peer.Name,
-					"public_key": peer.PublicKey,
-				}).Set(float64(lastHandshakeTime.Unix()))
-			} else {
-				wgPeerLastHandshakeMetric.With(prometheus.Labels{
-					"interface":  wg.Interface,
-					"peer_name":  peer.Name,
-					"public_key": peer.PublicKey,
-				}).Set(0)
-			}
-
-			wgPeerStatusMetric.With(prometheus.Labels{
-				"interface":  wg.Interface,
-				"peer_name":  peer.Name,
-				"public_key": peer.PublicKey,
-			}).Set(float64(peer.Enabled))
-
-			totalPeers++
-		}
-	}
-
-	// Set the total number of peers metric
 	wgTotalPeersMetric.Set(float64(totalPeers))
 
-	// Update the WireGuard configuration
-	if err := c.FetchWireGuardConfig(); err != nil {
+	if err = c.FetchWireGuardConfig(); err != nil {
 		return err
 	}
 	return nil
 }
 
-// FetchWireGuardStatus fetches the WireGuard status from the endpoint
+// FetchWireGuardStatus fetches the WireGuard status from the OPNsense API and returns the structured representation.
 func (c *Client) FetchWireGuardStatus() (*WireGuardStatus, error) {
 	body, err := c.fetch("/api/wireguard/general/getStatus")
 	if err != nil {
@@ -183,26 +130,23 @@ func (c *Client) FetchWireGuardStatus() (*WireGuardStatus, error) {
 	}
 
 	var status WireGuardStatus
-	if err := json.Unmarshal(body, &status); err != nil {
+	err = json.Unmarshal(body, &status)
+	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal WireGuard status: %v", err)
 	}
 
 	return &status, nil
 }
 
-// NewClient создает новый клиент для OPNsense API
+// NewClient creates a new Client instance for interfacing with the OPNsense API.
 func NewClient(apiKey, apiSecret, baseURL string) (*Client, error) {
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true, // Добавляем эту опцию для игнорирования проверки валидности сертификата
-	}
-
-	transport := &http.Transport{
-		TLSClientConfig: tlsConfig,
-	}
+	tlsConfig := &tls.Config{InsecureSkipVerify: true} // Skip certificate validation
 
 	client := &http.Client{
-		Timeout:   10 * time.Second,
-		Transport: transport,
+		Timeout: defaultHTTPClientTimeout,
+		Transport: &http.Transport{
+			TLSClientConfig: tlsConfig,
+		},
 	}
 
 	log.WithFields(log.Fields{"baseURL": baseURL}).Info("Connected to OPNsense")
@@ -213,14 +157,14 @@ func NewClient(apiKey, apiSecret, baseURL string) (*Client, error) {
 		APISecret:  apiSecret,
 		HTTPClient: client,
 	}, nil
-
 }
 
-// fetch выполняет запрос к API и возвращает результат
+// fetch performs an API request and returns the result body.
 func (c *Client) fetch(endpoint string) ([]byte, error) {
-	req, err := http.NewRequest("GET", c.BaseURL+endpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, c.BaseURL+endpoint, nil)
 	if err != nil {
-		log.WithError(err).Error("Failed to perform request")
+		log.WithError(err).Error("Failed to create request")
+		return nil, err
 	}
 
 	req.SetBasicAuth(c.APIKey, c.APISecret)
@@ -228,6 +172,7 @@ func (c *Client) fetch(endpoint string) ([]byte, error) {
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		log.WithError(err).Error("Failed to perform request")
+		return nil, err
 	}
 	defer resp.Body.Close()
 
@@ -235,7 +180,7 @@ func (c *Client) fetch(endpoint string) ([]byte, error) {
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %v", err)
 	}
@@ -243,7 +188,7 @@ func (c *Client) fetch(endpoint string) ([]byte, error) {
 	return body, nil
 }
 
-// FetchFirmwareStatus получает статус прошивки из OPNsense
+// FetchFirmwareStatus fetches firmware status from the OPNsense API and returns the structured representation.
 func (c *Client) FetchFirmwareStatus() (*FirmwareStatus, error) {
 	body, err := c.fetch("/api/core/firmware/status")
 	if err != nil {
@@ -251,55 +196,59 @@ func (c *Client) FetchFirmwareStatus() (*FirmwareStatus, error) {
 	}
 
 	var status FirmwareStatus
-	if err := json.Unmarshal(body, &status); err != nil {
+	err = json.Unmarshal(body, &status)
+	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal firmware status: %v", err)
 	}
 
 	return &status, nil
 }
 
-// FirmwareStatus структура для хранения статуса прошивки
-type FirmwareStatus struct {
-	Status             string `json:"status"`
-	DownloadSize       string `json:"download_size,omitempty"`
-	Updates            int    `json:"new_packages_length"`
-	NeedsReboot        string `json:"needs_reboot"`
-	UpgradeNeedsReboot string `json:"upgrade_needs_reboot"`
-	Connection         string `json:"connection"`
-	Repository         string `json:"repository"`
-	ProductLatest      string `json:"product_latest"`
-	ProductVersion     string `json:"product_version"`
-	StatusMsg          string `json:"status_msg,omitempty"`
+// updateFirmwareMetrics updates Prometheus metrics based on the provided firmware status information.
+func updateFirmwareMetrics(status *FirmwareStatus) {
+	needsReboot, _ := strconv.ParseFloat(status.NeedsReboot, 64)
+	needsRebootMetric.Set(needsReboot)
+
+	connectionStatusMetric.WithLabelValues(status.Connection).Set(1)
+	repositoryStatusMetric.WithLabelValues(status.Repository).Set(1)
+	productVersionMetric.WithLabelValues(status.ProductVersion).Set(1)
 }
 
-type WireGuardStatus struct {
-	Items map[string]struct {
-		Instance  int    `json:"instance"`
-		Interface string `json:"interface"`
-		Enabled   int    `json:"enabled"`
-		Name      string `json:"name"`
-		Peers     map[string]struct {
-			Name          string `json:"name"`
-			Enabled       int    `json:"enabled"`
-			PublicKey     string `json:"publicKey"`
-			LastHandshake string `json:"lastHandshake"`
-		} `json:"peers"`
-	} `json:"items"`
-}
-type WireGuardInterface struct {
-	Name          string
-	PublicKey     string
-	ListeningPort string
+// updateWireGuardStatusMetrics updates Prometheus metrics based on the provided WireGuard status information and returns the total number of peers.
+func updateWireGuardStatusMetrics(wgStatus *WireGuardStatus) (totalPeers int) {
+	for _, wg := range wgStatus.Items {
+		for _, peer := range wg.Peers {
+			lastHandshakeValue := float64(0)
+			if peer.LastHandshake != "0000-00-00 00:00:00+00:00" {
+				lastHandshakeTime, err := time.Parse(timeLayout, peer.LastHandshake)
+				if err != nil {
+					log.WithError(err).Error("Failed to parse last handshake time")
+					continue
+				}
+				lastHandshakeValue = float64(lastHandshakeTime.Unix())
+			}
+
+			wgPeerLastHandshakeMetric.WithLabelValues(wg.Interface, peer.Name, peer.PublicKey).Set(lastHandshakeValue)
+			wgPeerStatusMetric.WithLabelValues(wg.Interface, peer.Name, peer.PublicKey).Set(float64(peer.Enabled))
+			totalPeers++
+		}
+	}
+	return totalPeers
 }
 
-type WireGuardPeer struct {
-	Interface        string
-	PublicKey        string
-	TransferReceived uint64 // Store as bytes
-	TransferSent     uint64 // Store as bytes
+// updateWireGuardMetrics updates Prometheus metrics based on the provided interfaces and peers from WireGuard configuration.
+func updateWireGuardMetrics(interfaces []WireGuardInterface, peers []WireGuardPeer) {
+	for _, intf := range interfaces {
+		wgInterfaceInfoMetric.WithLabelValues(intf.Name, intf.PublicKey, intf.ListeningPort).Set(1)
+	}
+
+	for _, peer := range peers {
+		wgPeerTransferMetric.WithLabelValues(peer.Interface, peer.PublicKey, "received").Set(float64(peer.TransferReceived))
+		wgPeerTransferMetric.WithLabelValues(peer.Interface, peer.PublicKey, "sent").Set(float64(peer.TransferSent))
+	}
 }
 
-// parseWireGuardConfig parses the WireGuard configuration
+// parseWireGuardConfig parses the WireGuard configuration and returns structured interface and peer information.
 func parseWireGuardConfig(config []byte) ([]WireGuardInterface, []WireGuardPeer, error) {
 	var wgConf struct {
 		Response string `json:"response"`
@@ -311,9 +260,11 @@ func parseWireGuardConfig(config []byte) ([]WireGuardInterface, []WireGuardPeer,
 
 	lines := strings.Split(wgConf.Response, "\n")
 
-	var interfaces []WireGuardInterface
-	var peers []WireGuardPeer
-	var currentInterface string
+	var (
+		interfaces       []WireGuardInterface
+		peers            []WireGuardPeer
+		currentInterface *WireGuardInterface
+	)
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -322,45 +273,57 @@ func parseWireGuardConfig(config []byte) ([]WireGuardInterface, []WireGuardPeer,
 		case strings.HasPrefix(line, "interface:"):
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
-				currentInterface = fields[1]
-				interfaces = append(interfaces, WireGuardInterface{Name: currentInterface})
+				currentInterface = &WireGuardInterface{Name: fields[1]}
+				interfaces = append(interfaces, *currentInterface)
 			}
 		case strings.HasPrefix(line, "public key:"):
 			fields := strings.Fields(line)
-			if len(fields) >= 3 && len(interfaces) > 0 {
-				interfaces[len(interfaces)-1].PublicKey = fields[2]
+			if currentInterface != nil && len(fields) >= 3 {
+				currentInterface.PublicKey = fields[2]
 			}
 		case strings.HasPrefix(line, "listening port:"):
 			fields := strings.Fields(line)
-			if len(fields) >= 3 && len(interfaces) > 0 {
-				interfaces[len(interfaces)-1].ListeningPort = fields[2]
+			if currentInterface != nil && len(fields) >= 3 {
+				currentInterface.ListeningPort = fields[2]
 			}
 		case strings.HasPrefix(line, "peer:"):
 			fields := strings.Fields(line)
-			if len(fields) >= 2 {
+			if currentInterface != nil && len(fields) >= 2 {
 				peers = append(peers, WireGuardPeer{
-					Interface: currentInterface,
+					Interface: currentInterface.Name,
 					PublicKey: fields[1],
 				})
 			}
 		case strings.HasPrefix(line, "transfer:"):
 			fields := strings.Fields(line)
-			if len(fields) >= 5 && len(peers) > 0 {
-				receivedBytes, err := parseTransfer(fields[1] + " " + fields[2])
+			if len(peers) > 0 && len(fields) >= 5 {
+				lastPeer := &peers[len(peers)-1]
+				receivedBytes, sentBytes, err := parseTransferData(fields[1], fields[2], fields[4], fields[5])
 				if err != nil {
-					return nil, nil, fmt.Errorf("failed to parse received data: %v", err)
+					return nil, nil, err
 				}
-				sentBytes, err := parseTransfer(fields[4] + " " + fields[5])
-				if err != nil {
-					return nil, nil, fmt.Errorf("failed to parse sent data: %v", err)
-				}
-				peers[len(peers)-1].TransferReceived = receivedBytes
-				peers[len(peers)-1].TransferSent = sentBytes
+				lastPeer.TransferReceived = receivedBytes
+				lastPeer.TransferSent = sentBytes
 			}
 		}
 	}
 
 	return interfaces, peers, nil
+}
+
+// parseTransferData takes separate strings representing received and sent data (e.g., "19.34 MiB") and returns the values in bytes.
+func parseTransferData(received, receivedUnit, sent, sentUnit string) (uint64, uint64, error) {
+	receivedBytes, err := parseTransfer(received + " " + receivedUnit)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to parse received data: %v", err)
+	}
+
+	sentBytes, err := parseTransfer(sent + " " + sentUnit)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to parse sent data: %v", err)
+	}
+
+	return receivedBytes, sentBytes, nil
 }
 
 // parseTransfer takes a string representing data transfer (e.g., "19.34 MiB") and returns the value in bytes.
@@ -387,4 +350,51 @@ func parseTransfer(transfer string) (uint64, error) {
 	default:
 		return 0, fmt.Errorf("unrecognized data unit")
 	}
+}
+
+// Add additional types and methods as necessary below.
+
+// FirmwareStatus represents the firmware status retrieved from OPNsense.
+type FirmwareStatus struct {
+	Status             string `json:"status"`
+	DownloadSize       string `json:"download_size,omitempty"`
+	Updates            int    `json:"new_packages_length"`
+	NeedsReboot        string `json:"needs_reboot"`
+	UpgradeNeedsReboot string `json:"upgrade_needs_reboot"`
+	Connection         string `json:"connection"`
+	Repository         string `json:"repository"`
+	ProductLatest      string `json:"product_latest"`
+	ProductVersion     string `json:"product_version"`
+	StatusMsg          string `json:"status_msg,omitempty"`
+}
+
+// WireGuardStatus represents the WireGuard status retrieved from OPNsense.
+type WireGuardStatus struct {
+	Items map[string]struct {
+		Instance  int    `json:"instance"`
+		Interface string `json:"interface"`
+		Enabled   int    `json:"enabled"`
+		Name      string `json:"name"`
+		Peers     map[string]struct {
+			Name          string `json:"name"`
+			Enabled       int    `json:"enabled"`
+			PublicKey     string `json:"publicKey"`
+			LastHandshake string `json:"lastHandshake"`
+		} `json:"peers"`
+	} `json:"items"`
+}
+
+// WireGuardInterface represents the configuration of a WireGuard interface.
+type WireGuardInterface struct {
+	Name          string
+	PublicKey     string
+	ListeningPort string
+}
+
+// WireGuardPeer represents a peer within a WireGuard interface.
+type WireGuardPeer struct {
+	Interface        string
+	PublicKey        string
+	TransferReceived uint64 // Stored as bytes
+	TransferSent     uint64 // Stored as bytes
 }
