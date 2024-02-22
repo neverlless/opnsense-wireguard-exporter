@@ -52,7 +52,7 @@ docker build -t neverlless/opnsense-wireguard-exporter https://github.com/neverl
 
 
 | Env | Mandatory | Valid values | Default | Accepts multiple occurrences? | Description |
-| -- | -- | -- | -- | -- | -- | -- |
+| -- | -- | -- | -- | -- | -- |
 | `PROMETHEUS_WIREGUARD_EXPORTER_VERBOSE_ENABLED` | No | `true` or `false` | `false` | No | Enable verbose mode.
 | `PROMETHEUS_WIREGUARD_EXPORTER_PREPEND_SUDO_ENABLED` | No | `true` or `false` | `false` | No | Prepends sudo to `wg` commands.
 | `PROMETHEUS_WIREGUARD_EXPORTER_ADDRESS` | No | Any valid IP address | `0.0.0.0` | No | Specify the service address. This is the address your Prometheus instance should point to.
