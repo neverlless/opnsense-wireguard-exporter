@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	prometheus "github.com/prometheus/client_golang/prometheus"
@@ -53,6 +54,15 @@ var (
 		Name: "wireguard_total_peers",
 		Help: "Total number of WireGuard peers.",
 	})
+	wgInterfaceInfoMetric = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "wireguard_interface_info",
+		Help: "Information about the WireGuard interface.",
+	}, []string{"interface", "public_key", "listening_port"})
+
+	wgPeerTransferMetric = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "wireguard_peer_transfer_bytes",
+		Help: "Number of bytes transferred to and from the peer.",
+	}, []string{"interface", "peer_public_key", "direction"}) // direction can be "received" or "sent"
 )
 
 func init() {
@@ -64,6 +74,8 @@ func init() {
 	prometheus.MustRegister(wgPeerLastHandshakeMetric)
 	prometheus.MustRegister(wgPeerStatusMetric)
 	prometheus.MustRegister(wgTotalPeersMetric)
+	prometheus.MustRegister(wgInterfaceInfoMetric)
+	prometheus.MustRegister(wgPeerTransferMetric)
 
 	// Настройка logrus
 	log.SetFormatter(&log.TextFormatter{
@@ -74,6 +86,49 @@ func init() {
 
 }
 
+// FetchWireGuardConfig fetches the WireGuard configuration from the endpoint
+func (c *Client) FetchWireGuardConfig() error {
+	log.Println("Fetching WireGuard configuration...")
+	body, err := c.fetch("/api/wireguard/service/showconf")
+	if err != nil {
+		log.Printf("Error fetching WireGuard configuration: %v\n", err)
+		return err
+	}
+
+	interfaces, peers, err := parseWireGuardConfig(body)
+	if err != nil {
+		log.Printf("Failed to parse WireGuard config: %v\n", err)
+		return fmt.Errorf("failed to parse WireGuard config: %v", err)
+	}
+
+	log.Println("Updating WireGuard metrics...")
+	for _, intf := range interfaces {
+		wgInterfaceInfoMetric.WithLabelValues(
+			intf.Name,
+			intf.PublicKey,
+			intf.ListeningPort,
+		).Set(1) // Используем WithLabelValues вместо With
+	}
+
+	for _, peer := range peers {
+		wgPeerTransferMetric.WithLabelValues(
+			peer.Interface,
+			peer.PublicKey,
+			"received",
+		).Set(float64(peer.TransferReceived))
+
+		wgPeerTransferMetric.WithLabelValues(
+			peer.Interface,
+			peer.PublicKey,
+			"sent",
+		).Set(float64(peer.TransferSent))
+	}
+
+	log.Println("WireGuard metrics updated successfully.")
+	return nil
+}
+
+// UpdateMetrics обновляет метрики, получая статусы прошивки и WireGuard
 func (c *Client) UpdateMetrics() error {
 	firmwareStatus, err := c.FetchFirmwareStatus()
 	if err != nil {
@@ -110,8 +165,6 @@ func (c *Client) UpdateMetrics() error {
 					"public_key": peer.PublicKey,
 				}).Set(float64(lastHandshakeTime.Unix()))
 			} else {
-				// Handle the case where the last handshake time is not a valid date.
-				// For example, you can set the metric to a default value like 0.
 				wgPeerLastHandshakeMetric.With(prometheus.Labels{
 					"interface":  wg.Interface,
 					"peer_name":  peer.Name,
@@ -132,8 +185,11 @@ func (c *Client) UpdateMetrics() error {
 	// Set the total number of peers metric
 	wgTotalPeersMetric.Set(float64(totalPeers))
 
+	// Update the WireGuard configuration
+	if err := c.FetchWireGuardConfig(); err != nil {
+		return err
+	}
 	return nil
-
 }
 
 // FetchWireGuardStatus fetches the WireGuard status from the endpoint
@@ -246,4 +302,106 @@ type WireGuardStatus struct {
 			LastHandshake string `json:"lastHandshake"`
 		} `json:"peers"`
 	} `json:"items"`
+}
+type WireGuardInterface struct {
+	Name          string
+	PublicKey     string
+	ListeningPort string
+}
+
+type WireGuardPeer struct {
+	Interface        string
+	PublicKey        string
+	TransferReceived uint64 // Store as bytes
+	TransferSent     uint64 // Store as bytes
+}
+
+// parseWireGuardConfig parses the WireGuard configuration
+func parseWireGuardConfig(config []byte) ([]WireGuardInterface, []WireGuardPeer, error) {
+	var wgConf struct {
+		Response string `json:"response"`
+	}
+
+	if err := json.Unmarshal(config, &wgConf); err != nil {
+		return nil, nil, fmt.Errorf("failed to unmarshal response: %v", err)
+	}
+
+	lines := strings.Split(wgConf.Response, "\n")
+
+	var interfaces []WireGuardInterface
+	var peers []WireGuardPeer
+	var currentInterface string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		switch {
+		case strings.HasPrefix(line, "interface:"):
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				currentInterface = fields[1]
+				interfaces = append(interfaces, WireGuardInterface{Name: currentInterface})
+			}
+		case strings.HasPrefix(line, "public key:"):
+			fields := strings.Fields(line)
+			if len(fields) >= 3 && len(interfaces) > 0 {
+				interfaces[len(interfaces)-1].PublicKey = fields[2]
+			}
+		case strings.HasPrefix(line, "listening port:"):
+			fields := strings.Fields(line)
+			if len(fields) >= 3 && len(interfaces) > 0 {
+				interfaces[len(interfaces)-1].ListeningPort = fields[2]
+			}
+		case strings.HasPrefix(line, "peer:"):
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				peers = append(peers, WireGuardPeer{
+					Interface: currentInterface,
+					PublicKey: fields[1],
+				})
+			}
+		case strings.HasPrefix(line, "transfer:"):
+			fields := strings.Fields(line)
+			if len(fields) >= 5 && len(peers) > 0 {
+				receivedBytes, err := parseTransfer(fields[1] + " " + fields[2])
+				if err != nil {
+					return nil, nil, fmt.Errorf("failed to parse received data: %v", err)
+				}
+				sentBytes, err := parseTransfer(fields[4] + " " + fields[5])
+				if err != nil {
+					return nil, nil, fmt.Errorf("failed to parse sent data: %v", err)
+				}
+				peers[len(peers)-1].TransferReceived = receivedBytes
+				peers[len(peers)-1].TransferSent = sentBytes
+			}
+		}
+	}
+
+	return interfaces, peers, nil
+}
+
+// parseTransfer takes a string representing data transfer (e.g., "19.34 MiB") and returns the value in bytes.
+func parseTransfer(transfer string) (uint64, error) {
+	parts := strings.Fields(transfer)
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("invalid transfer data format")
+	}
+
+	value, err := strconv.ParseFloat(parts[0], 64)
+	if err != nil {
+		return 0, err
+	}
+
+	switch parts[1] {
+	case "KiB":
+		return uint64(value * 1024), nil
+	case "MiB":
+		return uint64(value * 1024 * 1024), nil
+	case "GiB":
+		return uint64(value * 1024 * 1024 * 1024), nil
+	case "TiB":
+		return uint64(value * 1024 * 1024 * 1024 * 1024), nil
+	default:
+		return 0, fmt.Errorf("unrecognized data unit")
+	}
 }

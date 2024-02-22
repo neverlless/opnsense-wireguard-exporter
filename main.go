@@ -12,9 +12,9 @@ import (
 
 func main() {
 	// Настройка клиента
-	apiKey := ""    // Замените на ваш API ключ
-	apiSecret := "" // Замените на ваш API секрет
-	baseURL := ""   // Замените на ваш базовый URL
+	apiKey := ""                       // Замените на ваш API ключ
+	apiSecret := ""                    // Замените на ваш API секрет
+	baseURL := "https://192.168.2.254" // Замените на ваш базовый URL
 
 	client, err := wireguard.NewClient(apiKey, apiSecret, baseURL)
 	if err != nil {
