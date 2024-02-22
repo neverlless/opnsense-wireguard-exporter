@@ -94,3 +94,4 @@ wireguard_total_peers 89
 - [ ] Add metrics General information on traffic passing through the firewall
 - [ ] Add metrics LA network interfaces
 - [ ] Add metrics Firewall declained packets
+- [ ] Grafana dashboard example
