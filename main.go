@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"opnsense-wireguard-exporter/pkg/wireguard"
@@ -12,9 +13,17 @@ import (
 )
 
 const (
-	defaultMetricsUpdateInterval = 30 * time.Second // Interval for metrics update
-	defaultListenAddress         = ":9100"          // Default listen address for the server
+	defaultMetricsUpdateIntervalSeconds = 30         // Default interval for metrics update in seconds
+	defaultListenAddress                = ":9100"    // Default listen address for the server
+	metricsEndpointPath                 = "/metrics" // Default metrics endpoint path
 )
+
+func getEnvWithDefault(key string, defaultValue string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return defaultValue
+}
 
 func main() {
 	// Client configuration
@@ -29,19 +38,26 @@ func main() {
 	}
 
 	// Metrics update loop
+	updateIntervalSeconds := getEnvWithDefault("METRICS_UPDATE_INTERVAL_SECONDS", strconv.Itoa(defaultMetricsUpdateIntervalSeconds))
+	updateInterval, err := strconv.Atoi(updateIntervalSeconds)
+	if err != nil {
+		log.Fatalf("Invalid METRICS_UPDATE_INTERVAL_SECONDS: %v", err)
+	}
 	go func() {
 		for {
 			if err := client.UpdateMetrics(); err != nil {
 				log.WithError(err).Error("Error updating metrics")
 			}
-			time.Sleep(defaultMetricsUpdateInterval)
+			time.Sleep(time.Duration(updateInterval) * time.Second)
 		}
 	}()
 
 	// Set up Prometheus metrics endpoint
-	http.Handle("/metrics", promhttp.Handler())
-	log.Infof("Beginning to serve on port %s", defaultListenAddress)
-	if err := http.ListenAndServe(defaultListenAddress, nil); err != nil {
+	listenAddress := getEnvWithDefault("LISTEN_ADDRESS", defaultListenAddress)
+	metricsPath := getEnvWithDefault("METRICS_ENDPOINT_PATH", metricsEndpointPath)
+	http.Handle(metricsPath, promhttp.Handler())
+	log.Infof("Beginning to serve on port %s", listenAddress)
+	if err := http.ListenAndServe(listenAddress, nil); err != nil {
 		log.WithError(err).Fatal("Server failed")
 	}
 }
