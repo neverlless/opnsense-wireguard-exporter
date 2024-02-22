@@ -50,6 +50,19 @@ docker build -t neverlless/opnsense-wireguard-exporter https://github.com/neverl
 | `LISTEN_ADDRESS` | No | `:9486`| `:9486`| The address to listen on for HTTP requests.
 | `METRICS_ENDPOINT_PATH` | No | `/metrics` | `/metrics` | The path to listen on for HTTP requests.
 
+
+| Parameter | Env | Mandatory | Valid values | Default | Accepts multiple occurrences? | Description |
+| -- | -- | -- | -- | -- | -- | -- |
+| `-v` | `PROMETHEUS_WIREGUARD_EXPORTER_VERBOSE_ENABLED` | No | `true` or `false` | `false` | No | Enable verbose mode.
+| `-a` | `PROMETHEUS_WIREGUARD_EXPORTER_PREPEND_SUDO_ENABLED` | No | `true` or `false` | `false` | No | Prepends sudo to `wg` commands.
+| `-l` | `PROMETHEUS_WIREGUARD_EXPORTER_ADDRESS` | No | Any valid IP address | `0.0.0.0` | No | Specify the service address. This is the address your Prometheus instance should point to.
+| `-p` | `PROMETHEUS_WIREGUARD_EXPORTER_PORT` | No | Any valid port number | `9586` | No | Specify the service port. This is the port your Prometheus instance should point to.
+| `-n` | `PROMETHEUS_WIREGUARD_EXPORTER_CONFIG_FILE_NAMES` | No | Path to the wireguard configuration file | | Yes | This flag adds the *friendly_name* attribute or the *friendly_json* attributes to the exported entries. See [Friendly tags](#friendly-tags) for more details. Multiple files are allowed (they will be merged as a single file in memory so avoid duplicates).
+| `-s` | `PROMETHEUS_WIREGUARD_EXPORTER_SEPARATE_ALLOWED_IPS_ENABLED` | No | `true` or `false` | `false` | No | Enable the allowed ip + subnet split mode for the labels.
+| `-r` | `PROMETHEUS_WIREGUARD_EXPORTER_EXPORT_REMOTE_IP_AND_PORT_ENABLED` | No | `true` or `false` | `false` | No | Exports peer's remote ip and port as labels (if available).
+| `-i` | `PROMETHEUS_WIREGUARD_EXPORTER_INTERFACES` | No | Your interface name(s) | `all` | Yes | Specifies the interface(s) passed to the `wg show <interface> dump` parameter. Multiple parameters are allowed.
+| `-d` | `EXPORT_LATEST_HANDSHAKE_DELAY` | No | `true` or `false` | `false` | No | Adds the `wireguard_latest_handshake_delay_seconds` metric that automatically calculates the seconds passed since the last handshake. 
+
 Once started, the tool will listen on the specified port (or the default one, 9486, if not specified) and return a Prometheus valid response at the url `/metrics`. So to check if the tool is working properly simply browse the `http://localhost:9586/metrics` (or whichever port you choose).
 
 ### Metrics exposed
