@@ -14,7 +14,7 @@ import (
 
 const (
 	defaultMetricsUpdateIntervalSeconds = 30         // Default interval for metrics update in seconds
-	defaultListenAddress                = ":9100"    // Default listen address for the server
+	defaultListenAddress                = ":9486"    // Default listen address for the server
 	metricsEndpointPath                 = "/metrics" // Default metrics endpoint path
 )
 
