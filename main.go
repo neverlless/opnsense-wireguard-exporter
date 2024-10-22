@@ -27,9 +27,9 @@ func getEnvWithDefault(key string, defaultValue string) string {
 
 func main() {
 	// Client configuration
-	apiKey := os.Getenv("OPNSENSE_API_KEY")       // Replace with your API key from environment variable
-	apiSecret := os.Getenv("OPNSENSE_API_SECRET") // Replace with your API secret from environment variable
-	baseURL := os.Getenv("OPNSENSE_BASE_URL")     // Replace with your base URL from environment variable
+	apiKey := os.Getenv("OPNSENSE_API_KEY")
+	apiSecret := os.Getenv("OPNSENSE_API_SECRET")
+	baseURL := os.Getenv("OPNSENSE_BASE_URL")
 
 	// Create a new OPNsense client
 	client, err := wireguard.NewClient(apiKey, apiSecret, baseURL)
