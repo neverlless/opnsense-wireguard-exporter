@@ -1,16 +1,23 @@
 # Prometheus OPNsense Wireguard Exporter
 
-## Intro
+## Introduction
 
-A Prometheus exporter for [WireGuard](https://www.wireguard.com) worked on [OPNsense](https://opnsense.org/), written in Go. This tool exports the data from OPNsense api results in a format that [Prometheus](https://prometheus.io/) can understand. The exporter is very light on your server resources, both in terms of memory and CPU usage.
+A Prometheus exporter for [WireGuard](https://www.wireguard.com) that operates on [OPNsense](https://opnsense.org/), written in Go. This tool exports data from the OPNsense API in a format that [Prometheus](https://prometheus.io/) can understand. The exporter is efficient, with minimal impact on server resources in terms of memory and CPU usage.
+
+## Features
+
+- **WireGuard Metrics**: Collects metrics such as data transfer, handshake times, and peer statuses from WireGuard interfaces.
+- **Interface Traffic Metrics**: Provides metrics on total bytes received and transmitted by network interfaces.
+- **Country Code Resolution**: Determines the country code for each peer's endpoint IP using `ip-api.com`, with rate limiting to prevent excessive API requests.
+- **Caching**: Implements caching for country codes to minimize redundant API requests.
 
 ## Setup
 
 ### Docker
 
-1. You need Docker installed
-2. You need [OPNsense](https://opnsense.org/) api endpoint and credentials.
-3. You need some Wireguard interfaces running
+1. Ensure Docker is installed on your system.
+2. Obtain your [OPNsense](https://opnsense.org/) API endpoint and credentials.
+3. Ensure you have WireGuard interfaces running.
 4. Download and run the container with:
 
     ```sh
@@ -22,17 +29,17 @@ A Prometheus exporter for [WireGuard](https://www.wireguard.com) worked on [OPNs
     neverlless/opnsense-wireguard-exporter
     ```
 
-5. Check it's up by visiting [http://localhost:9486/metrics](http://localhost:9486/metrics)
+5. Verify it's running by visiting [http://localhost:9486/metrics](http://localhost:9486/metrics).
 
-You can then update the image with
+To update the image:
 
 ```sh
 docker pull neverlless/opnsense-wireguard-exporter
 ```
 
-Or use a [tagged image](https://hub.docker.com/r/neverlless/opnsense-wireguard-exporter/tags) such as `:1.0.0`.
+Alternatively, use a [tagged image](https://hub.docker.com/r/neverlless/opnsense-wireguard-exporter/tags) such as `:1.0.0`.
 
-If your host has an `amd64` or `686` CPU, you can also build the Docker image from source (you need `git`) with:
+For `amd64` or `i686` CPUs, build the Docker image from source with:
 
 ```sh
 docker build -t neverlless/opnsense-wireguard-exporter https://github.com/neverlless/opnsense-wireguard-exporter.git#main
@@ -40,58 +47,49 @@ docker build -t neverlless/opnsense-wireguard-exporter https://github.com/neverl
 
 ## Usage
 
-### Envs available
+### Environment Variables
 
-| Env | Mandatory | Valid values | Default | Description |
+| Env | Mandatory | Valid Values | Default | Description |
 | -- | -- | -- | -- | -- |
-| `OPNSENSE_API_KEY` | Yes | `ezlPhf34oivo4vpr5mumOsdf1ipHrMfN/e4eoXMdaoeofVrfD9kUepl` |  | The API key to use for the OPNsense API. |
-| `OPNSENSE_API_SECRET` | Yes | `f3rf34mfoi3rmf34fimvo43vFGIJe3z9AOOP1UCZSd3wUfiy6bHOHXKv141Kz` | | The API secret to use for the OPNsense API. |
-| `OPNSENSE_BASE_URL` | Yes | `https://127.0.0.1`| | The base URL to use for the OPNsense API. |
-| `LISTEN_ADDRESS` | No | `:9486`| `:9486`| The address to listen on for HTTP requests. |
-| `METRICS_ENDPOINT_PATH` | No | `/metrics` | `/metrics` | The path to listen on for HTTP requests. |
+| `OPNSENSE_API_KEY` | Yes | `YOUR_API_KEY` |  | API key for OPNsense. |
+| `OPNSENSE_API_SECRET` | Yes | `YOUR_API_SECRET` | | API secret for OPNsense. |
+| `OPNSENSE_BASE_URL` | Yes | `https://your-opnsense-url` | | Base URL for the OPNsense API. |
+| `LISTEN_ADDRESS` | No | `:9486`| `:9486`| Address to listen on for HTTP requests. |
+| `METRICS_ENDPOINT_PATH` | No | `/metrics` | `/metrics` | Path for HTTP requests. |
 
-Once started, the tool will listen on the specified port (or the default one, 9486, if not specified) and return a Prometheus valid response at the url `/metrics`. So to check if the tool is working properly simply browse the `http://localhost:9586/metrics` (or whichever port you choose).
+Once started, the exporter listens on the specified port (default 9486) and serves metrics at the `/metrics` endpoint: [http://localhost:9486/metrics](http://localhost:9486/metrics).
 
-### Metrics exposed
+### Metrics Exposed
 
-```ebnf
-# HELP opnsense_firmware_connection_status Status of the connection to the firmware repository
-# TYPE opnsense_firmware_connection_status gauge
-opnsense_firmware_connection_status{status="ok"} 1
-# HELP opnsense_firmware_needs_reboot Indicates if a reboot is required after firmware updates
-# TYPE opnsense_firmware_needs_reboot gauge
-opnsense_firmware_needs_reboot 0
-# HELP opnsense_firmware_repository_status Status of the firmware repository
-# TYPE opnsense_firmware_repository_status gauge
-opnsense_firmware_repository_status{status="ok"} 1
-# HELP opnsense_product_version_info The current version of the OPNsense product
-# TYPE opnsense_product_version_info gauge
-opnsense_product_version_info{version="23.7.3"} 1
-# HELP wireguard_interface_info Information about the WireGuard interface.
-# TYPE wireguard_interface_info gauge
-wireguard_interface_info{interface="wg0",listening_port="",public_key=""} 1
-# HELP wireguard_peer_last_handshake_seconds Last handshake time with the peer as UNIX timestamp.
-# TYPE wireguard_peer_last_handshake_seconds gauge
-wireguard_peer_last_handshake_seconds{interface="wg0",peer_name="user1",public_key="iojfo4i344njnvernvlsvr4TQ="} 1.708611214e+09
-wireguard_peer_last_handshake_seconds{interface="wg0",peer_name="usertest",public_key="e/foweifjo34ivndlksvn4c="} 1.708595705e+09
-# HELP wireguard_peer_status Status of the WireGuard peer (enabled/disabled).
-# TYPE wireguard_peer_status gauge
-wireguard_peer_status{interface="wg0",peer_name="user1",public_key="iojfo4i344njnvernvlsvr4TQ="} 1
-wireguard_peer_status{interface="wg0",peer_name="usertest",public_key="e/foweifjo34ivndlksvn4c="} 1
-# HELP wireguard_peer_transfer_bytes Number of bytes transferred to and from the peer.
-# TYPE wireguard_peer_transfer_bytes gauge
-wireguard_peer_transfer_bytes{direction="received",interface="wg0",peer_public_key="iojfo4i344njnvernvlsvr4TQ="} 183982
-wireguard_peer_transfer_bytes{direction="received",interface="wg0",peer_public_key="e/foweifjo34ivndlksvn4c="} 0
-wireguard_peer_transfer_bytes{direction="sent",interface="wg0",peer_public_key="iojfo4i344njnvernvlsvr4TQ="} 1.163919e+06
-wireguard_peer_transfer_bytes{direction="sent",interface="wg0",peer_public_key="e/foweifjo34ivndlksvn4c="} 0
-# HELP wireguard_total_peers Total number of WireGuard peers.
-# TYPE wireguard_total_peers gauge
-wireguard_total_peers 89
+```plaintext
+# HELP wireguard_peer_transfer_rx_bytes Received bytes from the peer.
+# TYPE wireguard_peer_transfer_rx_bytes gauge
+wireguard_peer_transfer_rx_bytes{interface="wg0",peer_name="user1",public_key="..."} 183982
+
+# HELP wireguard_peer_transfer_tx_bytes Sent bytes to the peer.
+# TYPE wireguard_peer_transfer_tx_bytes gauge
+wireguard_peer_transfer_tx_bytes{interface="wg0",peer_name="user1",public_key="..."} 1163919
+
+# HELP wireguard_peer_latest_handshake Latest handshake time with the peer as UNIX timestamp.
+# TYPE wireguard_peer_latest_handshake gauge
+wireguard_peer_latest_handshake{interface="wg0",peer_name="user1",public_key="..."} 1708611214
+
+# HELP wireguard_peer_country_code Country code of the WireGuard peer.
+# TYPE wireguard_peer_country_code gauge
+wireguard_peer_country_code{interface="wg0",peer_name="user1",public_key="...",country_code="US"} 1
+
+# HELP interfaces_received_bytes_total Total bytes received by the interface.
+# TYPE interfaces_received_bytes_total gauge
+interfaces_received_bytes_total{interface="eth0",device="eth0",name="LAN"} 314980285383
+
+# HELP interfaces_transmitted_bytes_total Total bytes transmitted by the interface.
+# TYPE interfaces_transmitted_bytes_total gauge
+interfaces_transmitted_bytes_total{interface="eth0",device="eth0",name="LAN"} 684116309877
 ```
 
 ## TODO
 
-- [ ] Add metrics General information on traffic passing through the firewall
-- [ ] Add metrics LA network interfaces
-- [ ] Add metrics Firewall declained packets
-- [ ] Grafana dashboard example
+- [ ] Add metrics for general traffic information through the firewall.
+- [ ] Add metrics for local area network interfaces.
+- [ ] Add metrics for firewall declined packets.
+- [ ] Provide a Grafana dashboard example.
