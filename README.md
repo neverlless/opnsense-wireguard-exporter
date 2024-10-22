@@ -44,11 +44,11 @@ docker build -t neverlless/opnsense-wireguard-exporter https://github.com/neverl
 
 | Env | Mandatory | Valid values | Default | Description |
 | -- | -- | -- | -- | -- |
-| `OPNSENSE_API_KEY` | Yes | `ezlPhf34oivo4vpr5mumOsdf1ipHrMfN/e4eoXMdaoeofVrfD9kUepl` |  | The API key to use for the OPNsense API.
-| `OPNSENSE_API_SECRET` | Yes | `f3rf34mfoi3rmf34fimvo43vFGIJe3z9AOOP1UCZSd3wUfiy6bHOHXKv141Kz` | | The API secret to use for the OPNsense API.
-| `OPNSENSE_BASE_URL` | Yes | `https://127.0.0.1`| | The base URL to use for the OPNsense API.
-| `LISTEN_ADDRESS` | No | `:9486`| `:9486`| The address to listen on for HTTP requests.
-| `METRICS_ENDPOINT_PATH` | No | `/metrics` | `/metrics` | The path to listen on for HTTP requests.
+| `OPNSENSE_API_KEY` | Yes | `ezlPhf34oivo4vpr5mumOsdf1ipHrMfN/e4eoXMdaoeofVrfD9kUepl` |  | The API key to use for the OPNsense API. |
+| `OPNSENSE_API_SECRET` | Yes | `f3rf34mfoi3rmf34fimvo43vFGIJe3z9AOOP1UCZSd3wUfiy6bHOHXKv141Kz` | | The API secret to use for the OPNsense API. |
+| `OPNSENSE_BASE_URL` | Yes | `https://127.0.0.1`| | The base URL to use for the OPNsense API. |
+| `LISTEN_ADDRESS` | No | `:9486`| `:9486`| The address to listen on for HTTP requests. |
+| `METRICS_ENDPOINT_PATH` | No | `/metrics` | `/metrics` | The path to listen on for HTTP requests. |
 
 Once started, the tool will listen on the specified port (or the default one, 9486, if not specified) and return a Prometheus valid response at the url `/metrics`. So to check if the tool is working properly simply browse the `http://localhost:9586/metrics` (or whichever port you choose).
 
