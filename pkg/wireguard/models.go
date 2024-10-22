@@ -19,3 +19,15 @@ type PeerStatus struct {
 	Name            string `json:"name"`
 	Ifname          string `json:"ifname"`
 }
+
+type InterfaceTrafficStatus struct {
+	Interfaces map[string]InterfaceData `json:"interfaces"`
+	Time       float64                  `json:"time"`
+}
+
+type InterfaceData struct {
+	Device           string `json:"device"`
+	BytesReceived    string `json:"bytes received"`
+	BytesTransmitted string `json:"bytes transmitted"`
+	Name             string `json:"name"`
+}

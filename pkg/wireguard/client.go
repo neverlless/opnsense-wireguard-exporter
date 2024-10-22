@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,11 +27,13 @@ type Client struct {
 }
 
 var (
-	wgPeerTransferRxMetric      = newGaugeVec("wireguard_peer_transfer_rx_bytes", "Received bytes from the peer.", "interface", "peer_name", "public_key")
-	wgPeerTransferTxMetric      = newGaugeVec("wireguard_peer_transfer_tx_bytes", "Sent bytes to the peer.", "interface", "peer_name", "public_key")
-	wgPeerLatestHandshakeMetric = newGaugeVec("wireguard_peer_latest_handshake", "Latest handshake time with the peer as UNIX timestamp.", "interface", "peer_name", "public_key")
-	wgPeerAllowedIPsMetric      = newGaugeVec("wireguard_peer_allowed_ips", "Allowed IPs for the WireGuard peer.", "interface", "peer_name", "public_key", "allowed_ip")
-	wgPeerEndpointMetric        = newGaugeVec("wireguard_peer_endpoint", "Endpoint of the WireGuard peer.", "interface", "peer_name", "public_key", "endpoint_ip")
+	wgPeerTransferRxMetric          = newGaugeVec("wireguard_peer_transfer_rx_bytes", "Received bytes from the peer.", "interface", "peer_name", "public_key")
+	wgPeerTransferTxMetric          = newGaugeVec("wireguard_peer_transfer_tx_bytes", "Sent bytes to the peer.", "interface", "peer_name", "public_key")
+	wgPeerLatestHandshakeMetric     = newGaugeVec("wireguard_peer_latest_handshake", "Latest handshake time with the peer as UNIX timestamp.", "interface", "peer_name", "public_key")
+	wgPeerAllowedIPsMetric          = newGaugeVec("wireguard_peer_allowed_ips", "Allowed IPs for the WireGuard peer.", "interface", "peer_name", "public_key", "allowed_ip")
+	wgPeerEndpointMetric            = newGaugeVec("wireguard_peer_endpoint", "Endpoint of the WireGuard peer.", "interface", "peer_name", "public_key", "endpoint_ip")
+	interfaceReceivedBytesMetric    = newGaugeVec("interfaces_received_bytes_total", "Total bytes received by the interface.", "interface", "device", "name")
+	interfaceTransmittedBytesMetric = newGaugeVec("interfaces_transmitted_bytes_total", "Total bytes transmitted by the interface.", "interface", "device", "name")
 )
 
 func newGaugeVec(name, help string, labels ...string) *prometheus.GaugeVec {
@@ -44,6 +47,8 @@ func init() {
 		wgPeerLatestHandshakeMetric,
 		wgPeerAllowedIPsMetric,
 		wgPeerEndpointMetric,
+		interfaceReceivedBytesMetric,
+		interfaceTransmittedBytesMetric,
 	)
 
 	log.SetFormatter(&log.TextFormatter{
@@ -76,6 +81,7 @@ func NewClient(apiKey, apiSecret, baseURL string) (*Client, error) {
 func (c *Client) UpdateMetrics() error {
 	log.Println("Updating metrics...")
 
+	// Update WireGuard metrics
 	body, err := c.fetch("/api/wireguard/service/show")
 	if err != nil {
 		log.Errorf("Error fetching WireGuard configuration: %v", err)
@@ -90,8 +96,24 @@ func (c *Client) UpdateMetrics() error {
 	}
 
 	updateWireGuardMetrics(wgStatus.Rows)
-	log.Println("Metrics updated successfully.")
 
+	// Update interface metrics
+	body, err = c.fetch("/api/diagnostics/traffic/interface")
+	if err != nil {
+		log.Errorf("Error fetching interface traffic data: %v", err)
+		return err
+	}
+
+	var interfaceTraffic InterfaceTrafficStatus
+	err = json.Unmarshal(body, &interfaceTraffic)
+	if err != nil {
+		log.Errorf("Failed to parse interface traffic data: %v", err)
+		return fmt.Errorf("failed to parse interface traffic data: %v", err)
+	}
+
+	updateInterfaceMetrics(interfaceTraffic.Interfaces)
+
+	log.Println("Metrics updated successfully.")
 	return nil
 }
 
@@ -138,5 +160,25 @@ func updateWireGuardMetrics(rows []PeerStatus) {
 			endpointIP := strings.Split(row.Endpoint, ":")[0]
 			wgPeerEndpointMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, endpointIP).Set(1)
 		}
+	}
+}
+
+func updateInterfaceMetrics(interfaces map[string]InterfaceData) {
+	for name, data := range interfaces {
+		// Convert received bytes from string to int64
+		bytesReceived, err := strconv.ParseInt(data.BytesReceived, 10, 64)
+		if err != nil {
+			log.WithError(err).Errorf("Failed to parse bytes received for interface %s", name)
+			continue
+		}
+		interfaceReceivedBytesMetric.WithLabelValues(name, data.Device, data.Name).Set(float64(bytesReceived))
+
+		// Convert transmitted bytes from string to int64
+		bytesTransmitted, err := strconv.ParseInt(data.BytesTransmitted, 10, 64)
+		if err != nil {
+			log.WithError(err).Errorf("Failed to parse bytes transmitted for interface %s", name)
+			continue
+		}
+		interfaceTransmittedBytesMetric.WithLabelValues(name, data.Device, data.Name).Set(float64(bytesTransmitted))
 	}
 }
