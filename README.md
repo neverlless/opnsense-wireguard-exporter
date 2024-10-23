@@ -2,14 +2,14 @@
 
 ## Introduction
 
-A Prometheus exporter for [WireGuard](https://www.wireguard.com) that operates on [OPNsense](https://opnsense.org/), written in Go. This tool exports data from the OPNsense API in a format that [Prometheus](https://prometheus.io/) can understand. The exporter is efficient, with minimal impact on server resources in terms of memory and CPU usage.
+A Prometheus exporter for [WireGuard](https://www.wireguard.com) operating on [OPNsense](https://opnsense.org/), written in Go. This tool exports data from the OPNsense API in a format that [Prometheus](https://prometheus.io/) can understand. The exporter is efficient, with minimal impact on server resources in terms of memory and CPU usage.
 
 ## Features
 
 - **WireGuard Metrics**: Collects metrics such as data transfer, handshake times, and peer statuses from WireGuard interfaces.
 - **Interface Traffic Metrics**: Provides metrics on total bytes received and transmitted by network interfaces.
-- **Country Code Resolution**: Determines the country code for each peer's endpoint IP using `ip-api.com`, with rate limiting to prevent excessive API requests.
-- **Caching**: Implements caching for country codes to minimize redundant API requests.
+- **Country Code Resolution**: Determines the country code for each peer's endpoint IP using the MaxMind GeoLite2 database, eliminating the need for API requests.
+- **Caching**: Implements caching for country codes to minimize redundant lookups.
 
 ## Setup
 
@@ -25,6 +25,7 @@ A Prometheus exporter for [WireGuard](https://www.wireguard.com) that operates o
     -e OPNSENSE_API_KEY='YOUR_API_KEY' \
     -e OPNSENSE_API_SECRET='YOUR_API_SECRET' \
     -e OPNSENSE_BASE_URL='YOUR_API_URL' \
+    -e GEOLITE_DB_PATH='/opt/GeoLite2-Country.mmdb' \
     --name opnsense-wireguard-exporter \
     neverlless/opnsense-wireguard-exporter
     ```
@@ -45,6 +46,10 @@ For `amd64` or `i686` CPUs, build the Docker image from source with:
 docker build -t neverlless/opnsense-wireguard-exporter https://github.com/neverlless/opnsense-wireguard-exporter.git#main
 ```
 
+### Grafana Dashboard
+
+A Grafana dashboard is available to visualize the metrics collected by this exporter. You can find it in the `grafana` directory: `grafana/WireGuard Dashboard-1729676220092.json`.
+
 ## Usage
 
 ### Environment Variables
@@ -54,6 +59,7 @@ docker build -t neverlless/opnsense-wireguard-exporter https://github.com/neverl
 | `OPNSENSE_API_KEY` | Yes | `YOUR_API_KEY` |  | API key for OPNsense. |
 | `OPNSENSE_API_SECRET` | Yes | `YOUR_API_SECRET` | | API secret for OPNsense. |
 | `OPNSENSE_BASE_URL` | Yes | `https://your-opnsense-url` | | Base URL for the OPNsense API. |
+| `GEOLITE_DB_PATH` | No | `/opt/GeoLite2-Country.mmdb` | `/opt/GeoLite2-Country.mmdb` | Path to the MaxMind GeoLite2 database. |
 | `LISTEN_ADDRESS` | No | `:9486`| `:9486`| Address to listen on for HTTP requests. |
 | `METRICS_ENDPOINT_PATH` | No | `/metrics` | `/metrics` | Path for HTTP requests. |
 
@@ -92,4 +98,3 @@ interfaces_transmitted_bytes_total{interface="eth0",device="eth0",name="LAN"} 68
 - [ ] Add metrics for general traffic information through the firewall.
 - [ ] Add metrics for local area network interfaces.
 - [ ] Add metrics for firewall declined packets.
-- [ ] Provide a Grafana dashboard example.
