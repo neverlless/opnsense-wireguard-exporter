@@ -13,6 +13,7 @@ WORKDIR /opt
 
 COPY --from=builder /src/opnsense-wireguard-exporter opnsense-wireguard-exporter
 
-RUN chmod 755 /opt/opnsense-wireguard-exporter
+RUN wget -O GeoLite2-Country.mmdb https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb \
+    && chmod 755 /opt/opnsense-wireguard-exporter
 
 CMD [ "/opt/opnsense-wireguard-exporter" ]
