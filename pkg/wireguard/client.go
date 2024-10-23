@@ -5,22 +5,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"strconv"
 
+	"github.com/oschwald/geoip2-golang"
 	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/time/rate"
 )
 
 const (
 	timeLayout               = "2006-01-02 15:04:05-07:00"
 	defaultHTTPClientTimeout = 10 * time.Second
-	apiRateLimit             = 45               // 45 requests per minute
-	apiRateInterval          = time.Minute / 45 // interval between requests
+	defaultGeoLiteDBPath     = "/opt/GeoLite2-Country.mmdb" // Default path to the MaxMind database
 )
 
 type Client struct {
@@ -28,8 +29,8 @@ type Client struct {
 	APIKey     string
 	APISecret  string
 	HTTPClient *http.Client
-	limiter    *rate.Limiter
 	cache      map[string]string // Cache for country codes
+	geoDB      *geoip2.Reader    // MaxMind GeoIP2 database
 }
 
 var (
@@ -76,7 +77,11 @@ func NewClient(apiKey, apiSecret, baseURL string) (*Client, error) {
 		},
 	}
 
-	limiter := rate.NewLimiter(rate.Every(apiRateInterval), 1)
+	geoLiteDBPath := getEnvWithDefault("GEOLITE_DB_PATH", defaultGeoLiteDBPath)
+	geoDB, err := geoip2.Open(geoLiteDBPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open GeoLite2 database: %v", err)
+	}
 
 	log.WithFields(log.Fields{"baseURL": baseURL}).Info("Connected to OPNsense")
 
@@ -85,8 +90,8 @@ func NewClient(apiKey, apiSecret, baseURL string) (*Client, error) {
 		APIKey:     apiKey,
 		APISecret:  apiSecret,
 		HTTPClient: client,
-		limiter:    limiter,
-		cache:      make(map[string]string), // Cache for country codes
+		cache:      make(map[string]string),
+		geoDB:      geoDB,
 	}, nil
 }
 
@@ -158,7 +163,6 @@ func (c *Client) fetch(endpoint string) ([]byte, error) {
 }
 
 func updateWireGuardMetrics(c *Client, rows []PeerStatus) {
-	// Create a queue of IP addresses and a map to store peer information
 	ipQueue := make([]string, 0)
 	ipInfo := make(map[string]PeerStatus)
 
@@ -168,30 +172,29 @@ func updateWireGuardMetrics(c *Client, rows []PeerStatus) {
 			wgPeerTransferTxMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey).Set(float64(row.TransferTx))
 			wgPeerLatestHandshakeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey).Set(float64(row.LatestHandshake))
 
-			// Extract IP address without prefix for Allowed IPs
 			allowedIP := strings.Split(row.AllowedIPs, "/")[0]
 			wgPeerAllowedIPsMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, allowedIP).Set(1)
 
-			// Extract IP address without port for Endpoint
 			endpointIP := strings.Split(row.Endpoint, ":")[0]
 			wgPeerEndpointMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, endpointIP).Set(1)
 
-			// Check if endpointIP is valid before querying
 			if endpointIP != "" && endpointIP != "(none)" {
-				// Add IP to queue and save peer information
-				ipQueue = append(ipQueue, endpointIP)
-				ipInfo[endpointIP] = row
+				if _, found := c.cache[endpointIP]; !found {
+					ipQueue = append(ipQueue, endpointIP)
+					ipInfo[endpointIP] = row
+				} else {
+					countryCode := c.cache[endpointIP]
+					wgPeerCountryCodeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, countryCode).Set(1)
+				}
 			} else {
-				// log.Warnf("Invalid endpoint IP for peer %s: %s", row.Name, endpointIP)
+				log.Warnf("Invalid endpoint IP for peer %s: %s", row.Name, endpointIP)
 				wgPeerCountryCodeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, "unknown").Set(1)
 			}
 		}
 	}
 
-	// Process part of the queue to avoid exceeding the limit
-	for _, ip := range ipQueue[:min(len(ipQueue), apiRateLimit)] {
+	for _, ip := range ipQueue[:min(len(ipQueue), 45)] {
 		row := ipInfo[ip]
-		// Check cache before querying
 		if countryCode, found := c.cache[ip]; found {
 			log.Infof("Cache hit for IP: %s, country code: %s", ip, countryCode)
 			wgPeerCountryCodeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, countryCode).Set(1)
@@ -199,7 +202,6 @@ func updateWireGuardMetrics(c *Client, rows []PeerStatus) {
 		}
 
 		log.Infof("Attempting to query country code for IP: %s", ip)
-		// Get country code from endpoint IP
 		countryCode, err := c.getCountryCode(ip)
 		if err != nil {
 			log.WithError(err).Errorf("Failed to get country code for IP %s", ip)
@@ -211,58 +213,23 @@ func updateWireGuardMetrics(c *Client, rows []PeerStatus) {
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func (c *Client) getCountryCode(ip string) (string, error) {
-	if !c.limiter.Allow() {
-		log.Warnf("Rate limit exceeded, skipping IP: %s", ip)
-		c.cache[ip] = "unknown"
-		return "unknown", nil
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return "unknown", fmt.Errorf("invalid IP address: %s", ip)
 	}
 
-	log.Infof("Sending request to ip-api.com for IP: %s", ip)
-	resp, err := c.HTTPClient.Get(fmt.Sprintf("http://ip-api.com/json/%s", ip))
+	record, err := c.geoDB.Country(parsedIP)
 	if err != nil {
-		log.WithError(err).Errorf("HTTP request failed for IP %s", ip)
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		log.Errorf("Received non-OK HTTP status %d for IP %s", resp.StatusCode, ip)
-		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return "unknown", fmt.Errorf("failed to get country code for IP %s: %v", ip, err)
 	}
 
-	var result struct {
-		CountryCode string `json:"countryCode"`
-		Status      string `json:"status"`
-		Message     string `json:"message"`
-	}
-
-	err = json.NewDecoder(resp.Body).Decode(&result)
-	if err != nil {
-		log.WithError(err).Errorf("Failed to decode JSON response for IP %s", ip)
-		return "", err
-	}
-
-	if result.Status != "success" {
-		log.Warnf("Failed to get country code for IP %s: %s", ip, result.Message)
-		c.cache[ip] = "unknown"
-		return "unknown", nil
-	}
-
-	c.cache[ip] = result.CountryCode // Save to cache
-	return result.CountryCode, nil
+	c.cache[ip] = record.Country.IsoCode
+	return record.Country.IsoCode, nil
 }
 
 func updateInterfaceMetrics(interfaces map[string]InterfaceData) {
 	for name, data := range interfaces {
-		// Convert received bytes from string to int64
 		bytesReceived, err := strconv.ParseInt(data.BytesReceived, 10, 64)
 		if err != nil {
 			log.WithError(err).Errorf("Failed to parse bytes received for interface %s", name)
@@ -270,7 +237,6 @@ func updateInterfaceMetrics(interfaces map[string]InterfaceData) {
 		}
 		interfaceReceivedBytesMetric.WithLabelValues(name, data.Device, data.Name).Set(float64(bytesReceived))
 
-		// Convert transmitted bytes from string to int64
 		bytesTransmitted, err := strconv.ParseInt(data.BytesTransmitted, 10, 64)
 		if err != nil {
 			log.WithError(err).Errorf("Failed to parse bytes transmitted for interface %s", name)
@@ -278,4 +244,11 @@ func updateInterfaceMetrics(interfaces map[string]InterfaceData) {
 		}
 		interfaceTransmittedBytesMetric.WithLabelValues(name, data.Device, data.Name).Set(float64(bytesTransmitted))
 	}
+}
+
+func getEnvWithDefault(key string, defaultValue string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return defaultValue
 }
