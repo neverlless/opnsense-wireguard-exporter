@@ -187,7 +187,7 @@ func updateWireGuardMetrics(c *Client, rows []PeerStatus) {
 					wgPeerCountryCodeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, countryCode).Set(1)
 				}
 			} else {
-				log.Warnf("Invalid endpoint IP for peer %s: %s", row.Name, endpointIP)
+				// log.Warnf("Invalid endpoint IP for peer %s: %s", row.Name, endpointIP)
 				wgPeerCountryCodeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, "unknown").Set(1)
 			}
 		}
@@ -196,18 +196,18 @@ func updateWireGuardMetrics(c *Client, rows []PeerStatus) {
 	for _, ip := range ipQueue[:min(len(ipQueue), 45)] {
 		row := ipInfo[ip]
 		if countryCode, found := c.cache[ip]; found {
-			log.Infof("Cache hit for IP: %s, country code: %s", ip, countryCode)
+			// log.Infof("Cache hit for IP: %s, country code: %s", ip, countryCode)
 			wgPeerCountryCodeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, countryCode).Set(1)
 			continue
 		}
 
-		log.Infof("Attempting to query country code for IP: %s", ip)
+		// log.Infof("Attempting to query country code for IP: %s", ip)
 		countryCode, err := c.getCountryCode(ip)
 		if err != nil {
 			log.WithError(err).Errorf("Failed to get country code for IP %s", ip)
 			wgPeerCountryCodeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, "unknown").Set(1)
 		} else {
-			log.Infof("Country code for IP %s is %s", ip, countryCode)
+			// log.Infof("Country code for IP %s is %s", ip, countryCode)
 			wgPeerCountryCodeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, countryCode).Set(1)
 		}
 	}
