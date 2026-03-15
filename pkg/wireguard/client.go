@@ -1,6 +1,7 @@
 package wireguard
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -157,6 +158,13 @@ func (c *Client) fetch(endpoint string) ([]byte, error) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	// Detect HTML responses (e.g. login/redirect page when using plain HTTP or with wrong credentials).
+	// Trim leading whitespace before inspecting the first byte so that JSON with optional
+	// leading whitespace is not mis-classified.
+	if trimmed := bytes.TrimLeft(body, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '<' {
+		return nil, fmt.Errorf("API returned HTML instead of JSON for %s — verify that OPNSENSE_BASE_URL uses HTTPS and that API credentials are correct", endpoint)
 	}
 
 	return body, nil
