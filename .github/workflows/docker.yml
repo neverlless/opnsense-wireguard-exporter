@@ -2,11 +2,9 @@ name: Docker Image Publish
 
 on:
   push:
-    branches: [ "main" ]
-    # Publish semver tags as releases.
+    # Publish only on semver tags as releases.
     tags: [ 'v*.*.*' ]
-  pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:
 
 env:
   # Use docker.io for Docker Hub if empty
@@ -30,10 +28,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Install the cosign tool except on PR
+      # Install the cosign tool
       # https://github.com/sigstore/cosign-installer
       - name: Install cosign
-        if: github.event_name != 'pull_request'
         uses: sigstore/cosign-installer@v3.5.0
         with:
           cosign-release: 'v2.2.4'
@@ -43,10 +40,9 @@ jobs:
       - name: Setup Docker buildx
         uses: docker/setup-buildx-action@v3
 
-      # Login against a Docker registry except on PR
+      # Login against a Docker registry
       # https://github.com/docker/login-action
       - name: Log into registry ${{ env.REGISTRY }}
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -67,5 +63,5 @@ jobs:
         id: build-and-push
         uses: docker/build-push-action@v5
         with:
-          push: ${{ github.event_name != 'pull_request' }} # Don't push on PR
+          push: true
           tags: ${{ steps.meta.outputs.tags }}

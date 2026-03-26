@@ -5,10 +5,8 @@ name: Go
 
 on:
   push:
-    branches: [ "main" ]
+    # Run GoReleaser only on semver tags.
     tags: [ 'v*.*.*' ]
-  pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
