@@ -94,10 +94,14 @@ func NewClient(apiKey, apiSecret, baseURL string) (*Client, error) {
 		},
 	}
 
+	// The GeoLite2 database is optional: if it cannot be opened, country-code
+	// resolution is disabled (peers report country_code="unknown") but the
+	// exporter still serves all other metrics.
 	geoLiteDBPath := getEnvWithDefault("GEOLITE_DB_PATH", defaultGeoLiteDBPath)
 	geoDB, err := geoip2.Open(geoLiteDBPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open GeoLite2 database: %v", err)
+		log.WithError(err).Warnf("Could not open GeoLite2 database at %s; country-code resolution disabled", geoLiteDBPath)
+		geoDB = nil
 	}
 
 	log.WithFields(log.Fields{"baseURL": baseURL}).Info("Connected to OPNsense")
