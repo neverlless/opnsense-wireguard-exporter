@@ -6,10 +6,12 @@ A Prometheus exporter for [WireGuard](https://www.wireguard.com) operating on [O
 
 ## Features
 
-- **WireGuard Metrics**: Collects metrics such as data transfer, handshake times, and peer statuses from WireGuard interfaces.
-- **Interface Traffic Metrics**: Provides metrics on total bytes received and transmitted by network interfaces.
-- **Country Code Resolution**: Determines the country code for each peer's endpoint IP using the MaxMind GeoLite2 database, eliminating the need for API requests.
-- **Caching**: Implements caching for country codes to minimize redundant lookups.
+- **WireGuard Metrics**: Collects metrics such as data transfer, handshake times/age, keepalive, and peer/interface status from WireGuard interfaces.
+- **Interface Traffic Metrics**: Provides proper Prometheus counters for total bytes received and transmitted by network interfaces.
+- **Country Code Resolution**: Determines the country code for each peer's endpoint IP using the MaxMind GeoLite2 database (optional — the exporter runs without it, reporting `country_code="unknown"`).
+- **Scrape Health**: Exposes `wireguard_up`, an error counter, and a last-scrape timestamp so failures to reach the OPNsense API are observable.
+- **Fresh Series**: Stale per-peer/endpoint series are cleared each cycle, so departed peers and roaming endpoints don't linger forever.
+- **IPv6-aware**: Correctly parses IPv6 endpoints and peers with multiple allowed-ips.
 
 ## Setup
 
@@ -59,9 +61,13 @@ A Grafana dashboard is available to visualize the metrics collected by this expo
 | `OPNSENSE_API_KEY` | Yes | `YOUR_API_KEY` |  | API key for OPNsense. |
 | `OPNSENSE_API_SECRET` | Yes | `YOUR_API_SECRET` | | API secret for OPNsense. |
 | `OPNSENSE_BASE_URL` | Yes | `https://your-opnsense-url` | | Base URL for the OPNsense API. |
-| `GEOLITE_DB_PATH` | No | `/opt/GeoLite2-Country.mmdb` | `/opt/GeoLite2-Country.mmdb` | Path to the MaxMind GeoLite2 database. |
+| `GEOLITE_DB_PATH` | No | `/opt/GeoLite2-Country.mmdb` | `/opt/GeoLite2-Country.mmdb` | Path to the MaxMind GeoLite2 database. If missing, country resolution is disabled. |
+| `OPNSENSE_TLS_INSECURE` | No | `true` / `false` | `true` | Skip TLS certificate verification. Defaults to `true` because OPNsense typically uses a self-signed certificate. Set to `false` when using a trusted certificate. |
+| `METRICS_UPDATE_INTERVAL_SECONDS` | No | `30` | `30` | How often metrics are refreshed from the OPNsense API. |
 | `LISTEN_ADDRESS` | No | `:9486`| `:9486`| Address to listen on for HTTP requests. |
 | `METRICS_ENDPOINT_PATH` | No | `/metrics` | `/metrics` | Path for HTTP requests. |
+
+A liveness endpoint is available at `/healthz`.
 
 Once started, the exporter listens on the specified port (default 9486) and serves metrics at the `/metrics` endpoint: [http://localhost:9486/metrics](http://localhost:9486/metrics).
 
@@ -89,8 +95,32 @@ wireguard_peer_country_code{interface="wg0",peer_name="user1",public_key="...",c
 interfaces_received_bytes_total{interface="eth0",device="eth0",name="LAN"} 314980285383
 
 # HELP interfaces_transmitted_bytes_total Total bytes transmitted by the interface.
-# TYPE interfaces_transmitted_bytes_total gauge
+# TYPE interfaces_transmitted_bytes_total counter
 interfaces_transmitted_bytes_total{interface="eth0",device="eth0",name="LAN"} 684116309877
+
+# HELP wireguard_peer_last_handshake_age_seconds Seconds since the peer's latest handshake.
+# TYPE wireguard_peer_last_handshake_age_seconds gauge
+wireguard_peer_last_handshake_age_seconds{interface="wg0",peer_name="user1",public_key="..."} 37
+
+# HELP wireguard_peer_persistent_keepalive_seconds Persistent keepalive interval for the peer in seconds (0 if disabled).
+# TYPE wireguard_peer_persistent_keepalive_seconds gauge
+wireguard_peer_persistent_keepalive_seconds{interface="wg0",peer_name="user1",public_key="..."} 25
+
+# HELP wireguard_interface_status WireGuard interface status (1 = up, 0 = down).
+# TYPE wireguard_interface_status gauge
+wireguard_interface_status{interface="wg0",name="WG Server"} 1
+
+# HELP wireguard_up Whether the last scrape of the OPNsense API fully succeeded (1) or not (0).
+# TYPE wireguard_up gauge
+wireguard_up 1
+
+# HELP wireguard_scrape_errors_total Total number of failed OPNsense API scrape cycles.
+# TYPE wireguard_scrape_errors_total counter
+wireguard_scrape_errors_total 0
+
+# HELP wireguard_last_scrape_timestamp_seconds Unix timestamp of the last fully successful scrape.
+# TYPE wireguard_last_scrape_timestamp_seconds gauge
+wireguard_last_scrape_timestamp_seconds 1708611214
 ```
 
 ## TODO
