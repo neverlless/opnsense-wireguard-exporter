@@ -1,6 +1,6 @@
 module opnsense-wireguard-exporter
 
-go 1.21.4
+go 1.23.0
 
 require (
 	github.com/oschwald/geoip2-golang v1.11.0
