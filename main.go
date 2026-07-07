@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"opnsense-wireguard-exporter/pkg/wireguard"
@@ -16,7 +19,11 @@ const (
 	defaultMetricsUpdateIntervalSeconds = 30         // Default interval for metrics update in seconds
 	defaultListenAddress                = ":9486"    // Default listen address for the server
 	metricsEndpointPath                 = "/metrics" // Default metrics endpoint path
+	shutdownTimeout                     = 10 * time.Second
 )
+
+// version is overridable at build time via -ldflags "-X main.version=<tag>".
+var version = "dev"
 
 func getEnvWithDefault(key string, defaultValue string) string {
 	if value, exists := os.LookupEnv(key); exists {
@@ -26,6 +33,8 @@ func getEnvWithDefault(key string, defaultValue string) string {
 }
 
 func main() {
+	log.Infof("Starting opnsense-wireguard-exporter %s", version)
+
 	// Client configuration
 	apiKey := os.Getenv("OPNSENSE_API_KEY")
 	apiSecret := os.Getenv("OPNSENSE_API_SECRET")
@@ -36,6 +45,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error creating OPNsense client: %v", err)
 	}
+	defer func() {
+		if cerr := client.Close(); cerr != nil {
+			log.WithError(cerr).Warn("Error closing client")
+		}
+	}()
+
+	// Root context cancelled on SIGINT/SIGTERM for graceful shutdown.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	// Metrics update loop
 	updateIntervalSeconds := getEnvWithDefault("METRICS_UPDATE_INTERVAL_SECONDS", strconv.Itoa(defaultMetricsUpdateIntervalSeconds))
@@ -43,21 +61,65 @@ func main() {
 	if err != nil {
 		log.Fatalf("Invalid METRICS_UPDATE_INTERVAL_SECONDS: %v", err)
 	}
+	go runUpdateLoop(ctx, client, time.Duration(updateInterval)*time.Second)
+
+	// Set up the HTTP server with sane timeouts (mitigates Slowloris-style attacks).
+	listenAddress := getEnvWithDefault("LISTEN_ADDRESS", defaultListenAddress)
+	metricsPath := getEnvWithDefault("METRICS_ENDPOINT_PATH", metricsEndpointPath)
+
+	mux := http.NewServeMux()
+	mux.Handle(metricsPath, promhttp.Handler())
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	server := &http.Server{
+		Addr:              listenAddress,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
 	go func() {
-		for {
-			if err := client.UpdateMetrics(); err != nil {
-				log.WithError(err).Error("Error updating metrics")
-			}
-			time.Sleep(time.Duration(updateInterval) * time.Second)
+		log.Infof("Beginning to serve on %s", listenAddress)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.WithError(err).Fatal("Server failed")
 		}
 	}()
 
-	// Set up Prometheus metrics endpoint
-	listenAddress := getEnvWithDefault("LISTEN_ADDRESS", defaultListenAddress)
-	metricsPath := getEnvWithDefault("METRICS_ENDPOINT_PATH", metricsEndpointPath)
-	http.Handle(metricsPath, promhttp.Handler())
-	log.Infof("Beginning to serve on port %s", listenAddress)
-	if err := http.ListenAndServe(listenAddress, nil); err != nil {
-		log.WithError(err).Fatal("Server failed")
+	// Block until a shutdown signal is received.
+	<-ctx.Done()
+	log.Info("Shutdown signal received, stopping server...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.WithError(err).Error("Graceful shutdown failed")
+	}
+	log.Info("Server stopped")
+}
+
+// runUpdateLoop refreshes metrics on a fixed interval until the context is cancelled.
+func runUpdateLoop(ctx context.Context, client *wireguard.Client, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	// Update immediately on startup rather than waiting for the first tick.
+	if err := client.UpdateMetrics(); err != nil {
+		log.WithError(err).Error("Error updating metrics")
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := client.UpdateMetrics(); err != nil {
+				log.WithError(err).Error("Error updating metrics")
+			}
+		}
 	}
 }

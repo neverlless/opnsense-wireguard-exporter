@@ -9,10 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strings"
 	"time"
-
-	"strconv"
 
 	"github.com/oschwald/geoip2-golang"
 	"github.com/prometheus/client_golang/prometheus"
@@ -35,14 +32,21 @@ type Client struct {
 }
 
 var (
-	wgPeerTransferRxMetric          = newGaugeVec("wireguard_peer_transfer_rx_bytes", "Received bytes from the peer.", "interface", "peer_name", "public_key")
-	wgPeerTransferTxMetric          = newGaugeVec("wireguard_peer_transfer_tx_bytes", "Sent bytes to the peer.", "interface", "peer_name", "public_key")
-	wgPeerLatestHandshakeMetric     = newGaugeVec("wireguard_peer_latest_handshake", "Latest handshake time with the peer as UNIX timestamp.", "interface", "peer_name", "public_key")
-	wgPeerAllowedIPsMetric          = newGaugeVec("wireguard_peer_allowed_ips", "Allowed IPs for the WireGuard peer.", "interface", "peer_name", "public_key", "allowed_ip")
-	wgPeerEndpointMetric            = newGaugeVec("wireguard_peer_endpoint", "Endpoint of the WireGuard peer.", "interface", "peer_name", "public_key", "endpoint_ip")
-	wgPeerCountryCodeMetric         = newGaugeVec("wireguard_peer_country_code", "Country code of the WireGuard peer.", "interface", "peer_name", "public_key", "country_code")
-	interfaceReceivedBytesMetric    = newGaugeVec("interfaces_received_bytes_total", "Total bytes received by the interface.", "interface", "device", "name")
-	interfaceTransmittedBytesMetric = newGaugeVec("interfaces_transmitted_bytes_total", "Total bytes transmitted by the interface.", "interface", "device", "name")
+	wgPeerTransferRxMetric      = newGaugeVec("wireguard_peer_transfer_rx_bytes", "Received bytes from the peer.", "interface", "peer_name", "public_key")
+	wgPeerTransferTxMetric      = newGaugeVec("wireguard_peer_transfer_tx_bytes", "Sent bytes to the peer.", "interface", "peer_name", "public_key")
+	wgPeerLatestHandshakeMetric = newGaugeVec("wireguard_peer_latest_handshake", "Latest handshake time with the peer as UNIX timestamp.", "interface", "peer_name", "public_key")
+	wgPeerAllowedIPsMetric      = newGaugeVec("wireguard_peer_allowed_ips", "Allowed IPs for the WireGuard peer.", "interface", "peer_name", "public_key", "allowed_ip")
+	wgPeerEndpointMetric        = newGaugeVec("wireguard_peer_endpoint", "Endpoint of the WireGuard peer.", "interface", "peer_name", "public_key", "endpoint_ip")
+	wgPeerCountryCodeMetric     = newGaugeVec("wireguard_peer_country_code", "Country code of the WireGuard peer.", "interface", "peer_name", "public_key", "country_code")
+	wgPeerHandshakeAgeMetric    = newGaugeVec("wireguard_peer_last_handshake_age_seconds", "Seconds since the peer's latest handshake.", "interface", "peer_name", "public_key")
+	wgPeerKeepaliveMetric       = newGaugeVec("wireguard_peer_persistent_keepalive_seconds", "Persistent keepalive interval for the peer in seconds (0 if disabled).", "interface", "peer_name", "public_key")
+	wgInterfaceStatusMetric     = newGaugeVec("wireguard_interface_status", "WireGuard interface status (1 = up, 0 = down).", "interface", "name")
+
+	wgUpMetric            = prometheus.NewGauge(prometheus.GaugeOpts{Name: "wireguard_up", Help: "Whether the last scrape of the OPNsense API fully succeeded (1) or not (0)."})
+	wgScrapeErrorsMetric  = prometheus.NewCounter(prometheus.CounterOpts{Name: "wireguard_scrape_errors_total", Help: "Total number of failed OPNsense API scrape cycles."})
+	wgLastScrapeTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{Name: "wireguard_last_scrape_timestamp_seconds", Help: "Unix timestamp of the last fully successful scrape."})
+
+	ifCollector = newInterfaceCollector()
 )
 
 func newGaugeVec(name, help string, labels ...string) *prometheus.GaugeVec {
@@ -57,8 +61,13 @@ func init() {
 		wgPeerAllowedIPsMetric,
 		wgPeerEndpointMetric,
 		wgPeerCountryCodeMetric,
-		interfaceReceivedBytesMetric,
-		interfaceTransmittedBytesMetric,
+		wgPeerHandshakeAgeMetric,
+		wgPeerKeepaliveMetric,
+		wgInterfaceStatusMetric,
+		wgUpMetric,
+		wgScrapeErrorsMetric,
+		wgLastScrapeTimestamp,
+		ifCollector,
 	)
 
 	log.SetFormatter(&log.TextFormatter{
@@ -69,7 +78,14 @@ func init() {
 }
 
 func NewClient(apiKey, apiSecret, baseURL string) (*Client, error) {
-	tlsConfig := &tls.Config{InsecureSkipVerify: true}
+	// OPNsense commonly ships with a self-signed certificate, so certificate
+	// verification is disabled by default. Set OPNSENSE_TLS_INSECURE=false to
+	// enforce verification when a trusted certificate is in use.
+	insecure := getEnvWithDefault("OPNSENSE_TLS_INSECURE", "true") != "false"
+	if !insecure {
+		log.Info("TLS certificate verification is enabled for OPNsense API requests")
+	}
+	tlsConfig := &tls.Config{InsecureSkipVerify: insecure}
 
 	client := &http.Client{
 		Timeout: defaultHTTPClientTimeout,
@@ -78,10 +94,14 @@ func NewClient(apiKey, apiSecret, baseURL string) (*Client, error) {
 		},
 	}
 
+	// The GeoLite2 database is optional: if it cannot be opened, country-code
+	// resolution is disabled (peers report country_code="unknown") but the
+	// exporter still serves all other metrics.
 	geoLiteDBPath := getEnvWithDefault("GEOLITE_DB_PATH", defaultGeoLiteDBPath)
 	geoDB, err := geoip2.Open(geoLiteDBPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open GeoLite2 database: %v", err)
+		log.WithError(err).Warnf("Could not open GeoLite2 database at %s; country-code resolution disabled", geoLiteDBPath)
+		geoDB = nil
 	}
 
 	log.WithFields(log.Fields{"baseURL": baseURL}).Info("Connected to OPNsense")
@@ -96,6 +116,43 @@ func NewClient(apiKey, apiSecret, baseURL string) (*Client, error) {
 	}, nil
 }
 
+// Close releases resources held by the client, in particular the GeoLite2
+// database handle. It is safe to call on a nil geoDB.
+func (c *Client) Close() error {
+	if c.geoDB != nil {
+		return c.geoDB.Close()
+	}
+	return nil
+}
+
+// recordSuccess marks the last scrape cycle as successful.
+func (c *Client) recordSuccess() {
+	wgUpMetric.Set(1)
+	wgLastScrapeTimestamp.Set(float64(time.Now().Unix()))
+}
+
+// recordFailure marks the last scrape cycle as failed and increments the error counter.
+func (c *Client) recordFailure() {
+	wgUpMetric.Set(0)
+	wgScrapeErrorsMetric.Inc()
+}
+
+// resetWireGuardMetrics clears all per-peer/per-interface WireGuard gauge series
+// so that peers or endpoints that have disappeared since the previous cycle do
+// not linger forever. It is called only on the success path, right before the
+// gauges are repopulated with fresh data.
+func resetWireGuardMetrics() {
+	wgPeerTransferRxMetric.Reset()
+	wgPeerTransferTxMetric.Reset()
+	wgPeerLatestHandshakeMetric.Reset()
+	wgPeerAllowedIPsMetric.Reset()
+	wgPeerEndpointMetric.Reset()
+	wgPeerCountryCodeMetric.Reset()
+	wgPeerHandshakeAgeMetric.Reset()
+	wgPeerKeepaliveMetric.Reset()
+	wgInterfaceStatusMetric.Reset()
+}
+
 func (c *Client) UpdateMetrics() error {
 	log.Println("Updating metrics...")
 
@@ -103,6 +160,7 @@ func (c *Client) UpdateMetrics() error {
 	body, err := c.fetch("/api/wireguard/service/show")
 	if err != nil {
 		log.Errorf("Error fetching WireGuard configuration: %v", err)
+		c.recordFailure()
 		return err
 	}
 
@@ -110,15 +168,18 @@ func (c *Client) UpdateMetrics() error {
 	err = json.Unmarshal(body, &wgStatus)
 	if err != nil {
 		log.Errorf("Failed to parse WireGuard config: %v", err)
+		c.recordFailure()
 		return fmt.Errorf("failed to parse WireGuard config: %v", err)
 	}
 
+	resetWireGuardMetrics()
 	updateWireGuardMetrics(c, wgStatus.Rows)
 
 	// Update interface metrics
 	body, err = c.fetch("/api/diagnostics/traffic/interface")
 	if err != nil {
 		log.Errorf("Error fetching interface traffic data: %v", err)
+		c.recordFailure()
 		return err
 	}
 
@@ -126,11 +187,13 @@ func (c *Client) UpdateMetrics() error {
 	err = json.Unmarshal(body, &interfaceTraffic)
 	if err != nil {
 		log.Errorf("Failed to parse interface traffic data: %v", err)
+		c.recordFailure()
 		return fmt.Errorf("failed to parse interface traffic data: %v", err)
 	}
 
 	updateInterfaceMetrics(interfaceTraffic.Interfaces)
 
+	c.recordSuccess()
 	log.Println("Metrics updated successfully.")
 	return nil
 }
@@ -171,57 +234,60 @@ func (c *Client) fetch(endpoint string) ([]byte, error) {
 }
 
 func updateWireGuardMetrics(c *Client, rows []PeerStatus) {
-	ipQueue := make([]string, 0)
-	ipInfo := make(map[string]PeerStatus)
-
 	for _, row := range rows {
-		if row.Type == "peer" {
-			wgPeerTransferRxMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey).Set(float64(row.TransferRx))
-			wgPeerTransferTxMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey).Set(float64(row.TransferTx))
-			wgPeerLatestHandshakeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey).Set(float64(row.LatestHandshake))
-
-			allowedIP := strings.Split(row.AllowedIPs, "/")[0]
-			wgPeerAllowedIPsMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, allowedIP).Set(1)
-
-			endpointIP := strings.Split(row.Endpoint, ":")[0]
-			wgPeerEndpointMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, endpointIP).Set(1)
-
-			if endpointIP != "" && endpointIP != "(none)" {
-				if _, found := c.cache[endpointIP]; !found {
-					ipQueue = append(ipQueue, endpointIP)
-					ipInfo[endpointIP] = row
-				} else {
-					countryCode := c.cache[endpointIP]
-					wgPeerCountryCodeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, countryCode).Set(1)
-				}
-			} else {
-				// log.Warnf("Invalid endpoint IP for peer %s: %s", row.Name, endpointIP)
-				wgPeerCountryCodeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, "unknown").Set(1)
+		switch row.Type {
+		case "interface":
+			status := 0.0
+			if row.Status == "up" {
+				status = 1
 			}
-		}
-	}
-
-	for _, ip := range ipQueue[:min(len(ipQueue), 45)] {
-		row := ipInfo[ip]
-		if countryCode, found := c.cache[ip]; found {
-			// log.Infof("Cache hit for IP: %s, country code: %s", ip, countryCode)
-			wgPeerCountryCodeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, countryCode).Set(1)
-			continue
-		}
-
-		// log.Infof("Attempting to query country code for IP: %s", ip)
-		countryCode, err := c.getCountryCode(ip)
-		if err != nil {
-			log.WithError(err).Errorf("Failed to get country code for IP %s", ip)
-			wgPeerCountryCodeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, "unknown").Set(1)
-		} else {
-			// log.Infof("Country code for IP %s is %s", ip, countryCode)
-			wgPeerCountryCodeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, countryCode).Set(1)
+			wgInterfaceStatusMetric.WithLabelValues(row.Ifname, row.Name).Set(status)
+		case "peer":
+			c.updatePeerMetrics(row)
 		}
 	}
 }
 
+func (c *Client) updatePeerMetrics(row PeerStatus) {
+	wgPeerTransferRxMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey).Set(float64(row.TransferRx))
+	wgPeerTransferTxMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey).Set(float64(row.TransferTx))
+	wgPeerLatestHandshakeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey).Set(float64(row.LatestHandshake))
+	wgPeerKeepaliveMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey).Set(parseKeepalive(row.PersistentKeepalive))
+
+	if row.LatestHandshakeAge != nil {
+		wgPeerHandshakeAgeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey).Set(float64(*row.LatestHandshakeAge))
+	}
+
+	// One series per allowed IP so peers with multiple allowed-ips are fully represented.
+	for _, allowedIP := range splitAllowedIPs(row.AllowedIPs) {
+		wgPeerAllowedIPsMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, allowedIP).Set(1)
+	}
+
+	endpointIP := endpointHost(row.Endpoint)
+	if endpointIP == "" {
+		wgPeerCountryCodeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, "unknown").Set(1)
+		return
+	}
+
+	wgPeerEndpointMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, endpointIP).Set(1)
+
+	countryCode, err := c.getCountryCode(endpointIP)
+	if err != nil {
+		log.WithError(err).Errorf("Failed to get country code for IP %s", endpointIP)
+		countryCode = "unknown"
+	}
+	wgPeerCountryCodeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, countryCode).Set(1)
+}
+
 func (c *Client) getCountryCode(ip string) (string, error) {
+	if cc, found := c.cache[ip]; found {
+		return cc, nil
+	}
+
+	if c.geoDB == nil {
+		return "unknown", fmt.Errorf("GeoLite2 database not loaded")
+	}
+
 	parsedIP := net.ParseIP(ip)
 	if parsedIP == nil {
 		return "unknown", fmt.Errorf("invalid IP address: %s", ip)
@@ -237,21 +303,9 @@ func (c *Client) getCountryCode(ip string) (string, error) {
 }
 
 func updateInterfaceMetrics(interfaces map[string]InterfaceData) {
-	for name, data := range interfaces {
-		bytesReceived, err := strconv.ParseInt(data.BytesReceived, 10, 64)
-		if err != nil {
-			log.WithError(err).Errorf("Failed to parse bytes received for interface %s", name)
-			continue
-		}
-		interfaceReceivedBytesMetric.WithLabelValues(name, data.Device, data.Name).Set(float64(bytesReceived))
-
-		bytesTransmitted, err := strconv.ParseInt(data.BytesTransmitted, 10, 64)
-		if err != nil {
-			log.WithError(err).Errorf("Failed to parse bytes transmitted for interface %s", name)
-			continue
-		}
-		interfaceTransmittedBytesMetric.WithLabelValues(name, data.Device, data.Name).Set(float64(bytesTransmitted))
-	}
+	// Interface byte counters are exposed as proper Prometheus counters through
+	// ifCollector, which emits them at scrape time from this snapshot.
+	ifCollector.Update(interfaces)
 }
 
 func getEnvWithDefault(key string, defaultValue string) string {
