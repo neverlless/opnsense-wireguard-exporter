@@ -22,3 +22,4 @@ go.work
 
 # Local planning/scratch docs (not part of the repo)
 /docs/superpowers/
+.ansible
