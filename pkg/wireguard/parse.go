@@ -25,8 +25,8 @@ func endpointHost(endpoint string) string {
 }
 
 // splitAllowedIPs turns a comma-separated allowed-ips list ("10.0.0.2/32,10.0.0.3/32")
-// into the bare IP addresses, dropping the CIDR mask. Returns nil for empty or
-// "(none)" values.
+// into its entries, keeping the CIDR mask because 10.0.0.0/24 and 10.0.0.0/32
+// are different allowed IPs. Returns nil for empty or "(none)" values.
 func splitAllowedIPs(raw string) []string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || raw == "(none)" {
@@ -36,14 +36,10 @@ func splitAllowedIPs(raw string) []string {
 	var ips []string
 	for _, part := range strings.Split(raw, ",") {
 		part = strings.TrimSpace(part)
-		if part == "" {
+		if part == "" || part == "(none)" {
 			continue
 		}
-		ip := strings.SplitN(part, "/", 2)[0]
-		if ip == "" || ip == "(none)" {
-			continue
-		}
-		ips = append(ips, ip)
+		ips = append(ips, part)
 	}
 	return ips
 }

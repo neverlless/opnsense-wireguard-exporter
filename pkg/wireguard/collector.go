@@ -10,8 +10,8 @@ import (
 )
 
 var (
-	wgPeerTransferRxDesc      = newPeerDesc("wireguard_peer_transfer_rx_bytes", "Received bytes from the peer.")
-	wgPeerTransferTxDesc      = newPeerDesc("wireguard_peer_transfer_tx_bytes", "Sent bytes to the peer.")
+	wgPeerTransferRxDesc      = newPeerDesc("wireguard_peer_transfer_rx_bytes_total", "Received bytes from the peer.")
+	wgPeerTransferTxDesc      = newPeerDesc("wireguard_peer_transfer_tx_bytes_total", "Sent bytes to the peer.")
 	wgPeerLatestHandshakeDesc = newPeerDesc("wireguard_peer_latest_handshake", "Latest handshake time with the peer as UNIX timestamp.")
 	wgPeerAllowedIPsDesc      = newPeerDesc("wireguard_peer_allowed_ips", "Allowed IPs for the WireGuard peer.", "allowed_ip")
 	wgPeerEndpointDesc        = newPeerDesc("wireguard_peer_endpoint", "Endpoint of the WireGuard peer.", "endpoint_ip")
@@ -95,8 +95,8 @@ func (c *Client) buildSnapshot(rows []PeerStatus, interfaces map[string]Interfac
 			add(wgInterfaceStatusDesc, prometheus.GaugeValue, status, row.Ifname, row.Name)
 		case "peer":
 			peer := []string{row.Ifname, row.Name, row.PublicKey}
-			add(wgPeerTransferRxDesc, prometheus.GaugeValue, float64(row.TransferRx), peer...)
-			add(wgPeerTransferTxDesc, prometheus.GaugeValue, float64(row.TransferTx), peer...)
+			add(wgPeerTransferRxDesc, prometheus.CounterValue, float64(row.TransferRx), peer...)
+			add(wgPeerTransferTxDesc, prometheus.CounterValue, float64(row.TransferTx), peer...)
 			add(wgPeerLatestHandshakeDesc, prometheus.GaugeValue, float64(row.LatestHandshake), peer...)
 			add(wgPeerKeepaliveDesc, prometheus.GaugeValue, parseKeepalive(row.PersistentKeepalive), peer...)
 

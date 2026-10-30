@@ -49,10 +49,10 @@ const metricsHeader = `
 # TYPE wireguard_peer_latest_handshake gauge
 # HELP wireguard_peer_persistent_keepalive_seconds Persistent keepalive interval for the peer in seconds (0 if disabled).
 # TYPE wireguard_peer_persistent_keepalive_seconds gauge
-# HELP wireguard_peer_transfer_rx_bytes Received bytes from the peer.
-# TYPE wireguard_peer_transfer_rx_bytes gauge
-# HELP wireguard_peer_transfer_tx_bytes Sent bytes to the peer.
-# TYPE wireguard_peer_transfer_tx_bytes gauge
+# HELP wireguard_peer_transfer_rx_bytes_total Received bytes from the peer.
+# TYPE wireguard_peer_transfer_rx_bytes_total counter
+# HELP wireguard_peer_transfer_tx_bytes_total Sent bytes to the peer.
+# TYPE wireguard_peer_transfer_tx_bytes_total counter
 `
 
 // snapshotMetricNames lists every metric replaced on a successful update.
@@ -66,8 +66,8 @@ var snapshotMetricNames = []string{
 	"wireguard_peer_last_handshake_age_seconds",
 	"wireguard_peer_latest_handshake",
 	"wireguard_peer_persistent_keepalive_seconds",
-	"wireguard_peer_transfer_rx_bytes",
-	"wireguard_peer_transfer_tx_bytes",
+	"wireguard_peer_transfer_rx_bytes_total",
+	"wireguard_peer_transfer_tx_bytes_total",
 }
 
 // assertExposed compares the snapshot metrics of gatherer with series.
@@ -118,8 +118,8 @@ func TestUpdateMetrics_Success(t *testing.T) {
 interfaces_received_bytes_total{device="igb0",interface="lan",name="LAN"} 1000
 interfaces_transmitted_bytes_total{device="igb0",interface="lan",name="LAN"} 2000
 wireguard_interface_status{interface="wg0",name="WG Server"} 1
-wireguard_peer_allowed_ips{allowed_ip="10.0.0.0",interface="wg0",peer_name="alice",public_key="PK1"} 1
-wireguard_peer_allowed_ips{allowed_ip="fd00::2",interface="wg0",peer_name="alice",public_key="PK1"} 1
+wireguard_peer_allowed_ips{allowed_ip="10.0.0.0/24",interface="wg0",peer_name="alice",public_key="PK1"} 1
+wireguard_peer_allowed_ips{allowed_ip="fd00::2/128",interface="wg0",peer_name="alice",public_key="PK1"} 1
 wireguard_peer_country_code{country_code="unknown",interface="wg0",peer_name="alice",public_key="PK1"} 1
 wireguard_peer_country_code{country_code="unknown",interface="wg0",peer_name="bob",public_key="PK2"} 1
 wireguard_peer_endpoint{endpoint_ip="2001:db8::1",interface="wg0",peer_name="alice",public_key="PK1"} 1
@@ -128,10 +128,10 @@ wireguard_peer_latest_handshake{interface="wg0",peer_name="alice",public_key="PK
 wireguard_peer_latest_handshake{interface="wg0",peer_name="bob",public_key="PK2"} 0
 wireguard_peer_persistent_keepalive_seconds{interface="wg0",peer_name="alice",public_key="PK1"} 25
 wireguard_peer_persistent_keepalive_seconds{interface="wg0",peer_name="bob",public_key="PK2"} 0
-wireguard_peer_transfer_rx_bytes{interface="wg0",peer_name="alice",public_key="PK1"} 1000
-wireguard_peer_transfer_rx_bytes{interface="wg0",peer_name="bob",public_key="PK2"} 0
-wireguard_peer_transfer_tx_bytes{interface="wg0",peer_name="alice",public_key="PK1"} 2000
-wireguard_peer_transfer_tx_bytes{interface="wg0",peer_name="bob",public_key="PK2"} 0
+wireguard_peer_transfer_rx_bytes_total{interface="wg0",peer_name="alice",public_key="PK1"} 1000
+wireguard_peer_transfer_rx_bytes_total{interface="wg0",peer_name="bob",public_key="PK2"} 0
+wireguard_peer_transfer_tx_bytes_total{interface="wg0",peer_name="alice",public_key="PK1"} 2000
+wireguard_peer_transfer_tx_bytes_total{interface="wg0",peer_name="bob",public_key="PK2"} 0
 `,
 		},
 		{
@@ -216,7 +216,7 @@ func TestUpdateMetrics_NoScrapeGap(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "traffic") {
-			if n, err := testutil.GatherAndCount(prometheus.DefaultGatherer, "wireguard_peer_transfer_rx_bytes"); err != nil || n != 2 {
+			if n, err := testutil.GatherAndCount(prometheus.DefaultGatherer, "wireguard_peer_transfer_rx_bytes_total"); err != nil || n != 2 {
 				t.Errorf("scrape during update saw %d peers, want 2 (err: %v)", n, err)
 			}
 			_, _ = w.Write([]byte(trafficJSON))
@@ -253,8 +253,8 @@ func TestBuildSnapshot_Peers(t *testing.T) {
 		{Type: "peer", Ifname: "wg0", Name: "bob", PublicKey: "PK2", Endpoint: "8.8.8.8:51820", AllowedIPs: "(none)"},
 	}
 	assertExposed(t, snapshotGatherer(&Client{geoDB: newTestGeoDB(t)}, rows, nil), `
-wireguard_peer_allowed_ips{allowed_ip="10.0.0.2",interface="wg0",peer_name="alice",public_key="PK1"} 1
-wireguard_peer_allowed_ips{allowed_ip="10.0.0.3",interface="wg0",peer_name="alice",public_key="PK1"} 1
+wireguard_peer_allowed_ips{allowed_ip="10.0.0.2/32",interface="wg0",peer_name="alice",public_key="PK1"} 1
+wireguard_peer_allowed_ips{allowed_ip="10.0.0.3/32",interface="wg0",peer_name="alice",public_key="PK1"} 1
 wireguard_peer_country_code{country_code="DE",interface="wg0",peer_name="bob",public_key="PK2"} 1
 wireguard_peer_country_code{country_code="unknown",interface="wg0",peer_name="alice",public_key="PK1"} 1
 wireguard_peer_endpoint{endpoint_ip="2001:db8::1",interface="wg0",peer_name="alice",public_key="PK1"} 1
@@ -264,10 +264,10 @@ wireguard_peer_latest_handshake{interface="wg0",peer_name="alice",public_key="PK
 wireguard_peer_latest_handshake{interface="wg0",peer_name="bob",public_key="PK2"} 0
 wireguard_peer_persistent_keepalive_seconds{interface="wg0",peer_name="alice",public_key="PK1"} 25
 wireguard_peer_persistent_keepalive_seconds{interface="wg0",peer_name="bob",public_key="PK2"} 0
-wireguard_peer_transfer_rx_bytes{interface="wg0",peer_name="alice",public_key="PK1"} 0
-wireguard_peer_transfer_rx_bytes{interface="wg0",peer_name="bob",public_key="PK2"} 0
-wireguard_peer_transfer_tx_bytes{interface="wg0",peer_name="alice",public_key="PK1"} 0
-wireguard_peer_transfer_tx_bytes{interface="wg0",peer_name="bob",public_key="PK2"} 0
+wireguard_peer_transfer_rx_bytes_total{interface="wg0",peer_name="alice",public_key="PK1"} 0
+wireguard_peer_transfer_rx_bytes_total{interface="wg0",peer_name="bob",public_key="PK2"} 0
+wireguard_peer_transfer_tx_bytes_total{interface="wg0",peer_name="alice",public_key="PK1"} 0
+wireguard_peer_transfer_tx_bytes_total{interface="wg0",peer_name="bob",public_key="PK2"} 0
 `)
 }
 
@@ -281,12 +281,12 @@ func TestBuildSnapshot_Duplicates(t *testing.T) {
 
 	assertExposed(t, snapshotGatherer(&Client{}, []PeerStatus{peer, repeated, iface, iface}, nil), `
 wireguard_interface_status{interface="wg0",name="WG Server"} 1
-wireguard_peer_allowed_ips{allowed_ip="10.0.0.2",interface="wg0",peer_name="alice",public_key="PK1"} 1
+wireguard_peer_allowed_ips{allowed_ip="10.0.0.2/32",interface="wg0",peer_name="alice",public_key="PK1"} 1
 wireguard_peer_country_code{country_code="unknown",interface="wg0",peer_name="alice",public_key="PK1"} 1
 wireguard_peer_latest_handshake{interface="wg0",peer_name="alice",public_key="PK1"} 0
 wireguard_peer_persistent_keepalive_seconds{interface="wg0",peer_name="alice",public_key="PK1"} 0
-wireguard_peer_transfer_rx_bytes{interface="wg0",peer_name="alice",public_key="PK1"} 1
-wireguard_peer_transfer_tx_bytes{interface="wg0",peer_name="alice",public_key="PK1"} 0
+wireguard_peer_transfer_rx_bytes_total{interface="wg0",peer_name="alice",public_key="PK1"} 1
+wireguard_peer_transfer_tx_bytes_total{interface="wg0",peer_name="alice",public_key="PK1"} 0
 `)
 }
 
