@@ -70,11 +70,11 @@ var snapshotMetricNames = []string{
 	"wireguard_peer_transfer_tx_bytes",
 }
 
-// assertExposed compares the snapshot metrics on the default registry with series.
-func assertExposed(t *testing.T, series string) {
+// assertExposed compares the snapshot metrics of gatherer with series.
+func assertExposed(t *testing.T, gatherer prometheus.Gatherer, series string) {
 	t.Helper()
 	expected := strings.NewReader(metricsHeader + series)
-	if err := testutil.GatherAndCompare(prometheus.DefaultGatherer, expected, snapshotMetricNames...); err != nil {
+	if err := testutil.GatherAndCompare(gatherer, expected, snapshotMetricNames...); err != nil {
 		t.Error(err)
 	}
 }
@@ -152,7 +152,7 @@ wireguard_peer_transfer_tx_bytes{interface="wg0",peer_name="bob",public_key="PK2
 			if err := c.UpdateMetrics(); err != nil {
 				t.Fatalf("UpdateMetrics: %v", err)
 			}
-			assertExposed(t, tc.want)
+			assertExposed(t, prometheus.DefaultGatherer, tc.want)
 			if got := testutil.ToFloat64(wgUpMetric); got != 1 {
 				t.Errorf("wireguard_up = %v, want 1", got)
 			}
@@ -163,138 +163,142 @@ wireguard_peer_transfer_tx_bytes{interface="wg0",peer_name="bob",public_key="PK2
 	}
 }
 
-// TestUpdateMetrics_SecondRequestFails verifies a failing traffic endpoint fails
-// the cycle even though the WireGuard endpoint succeeded.
-func TestUpdateMetrics_SecondRequestFails(t *testing.T) {
-	c := newTestClient(newAPIServer(t, wgShowJSON, ""))
-	wgUpMetric.Set(1)
-	before := testutil.ToFloat64(wgScrapeErrorsMetric)
+// TestUpdateMetrics_FailureKeepsSnapshot verifies wireguard_up drops to 0, the
+// error counter increments, and no failure replaces any part of the snapshot.
+func TestUpdateMetrics_FailureKeepsSnapshot(t *testing.T) {
+	const (
+		goodWG = `{"rows":[{"type":"interface","status":"up","name":"WG Server","ifname":"wg0"}]}`
+		want   = `
+interfaces_received_bytes_total{device="igb0",interface="lan",name="LAN"} 1000
+interfaces_transmitted_bytes_total{device="igb0",interface="lan",name="LAN"} 2000
+wireguard_interface_status{interface="wg0",name="WG Server"} 1
+`
+		otherWG      = `{"rows":[]}`
+		otherTraffic = `{"interfaces":{}}`
+	)
+	cases := []struct {
+		name        string
+		wgBody      string
+		trafficBody string
+	}{
+		{name: "first request fails", trafficBody: otherTraffic},
+		{name: "first response unparsable", wgBody: "not json", trafficBody: otherTraffic},
+		{name: "second request fails", wgBody: otherWG},
+		{name: "second response unparsable", wgBody: otherWG, trafficBody: "not json"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := newTestClient(newAPIServer(t, goodWG, trafficJSON)).UpdateMetrics(); err != nil {
+				t.Fatalf("UpdateMetrics: %v", err)
+			}
+			before := testutil.ToFloat64(wgScrapeErrorsMetric)
 
-	if err := c.UpdateMetrics(); err == nil {
-		t.Fatal("expected error from failing traffic endpoint, got nil")
-	}
-	if got := testutil.ToFloat64(wgUpMetric); got != 0 {
-		t.Errorf("wireguard_up = %v, want 0 after failure", got)
-	}
-	if after := testutil.ToFloat64(wgScrapeErrorsMetric); after != before+1 {
-		t.Errorf("scrape errors = %v, want %v", after, before+1)
+			if err := newTestClient(newAPIServer(t, tc.wgBody, tc.trafficBody)).UpdateMetrics(); err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if got := testutil.ToFloat64(wgUpMetric); got != 0 {
+				t.Errorf("wireguard_up = %v, want 0 after failure", got)
+			}
+			if after := testutil.ToFloat64(wgScrapeErrorsMetric); after != before+1 {
+				t.Errorf("scrape errors = %v, want %v", after, before+1)
+			}
+			assertExposed(t, prometheus.DefaultGatherer, want)
+		})
 	}
 }
 
-// TestUpdatePeerMetrics_IPv6AndAllowedIPs verifies IPv6 endpoint parsing, that
-// every allowed IP produces its own series, and keepalive/handshake-age metrics.
-func TestUpdatePeerMetrics_IPv6AndAllowedIPs(t *testing.T) {
-	resetWireGuardMetrics()
-	c := &Client{}
+// TestUpdateMetrics_NoScrapeGap scrapes while the second request is in flight:
+// the previous snapshot must still be fully visible at that point.
+func TestUpdateMetrics_NoScrapeGap(t *testing.T) {
+	if err := newTestClient(newAPIServer(t, wgShowJSON, trafficJSON)).UpdateMetrics(); err != nil {
+		t.Fatalf("UpdateMetrics: %v", err)
+	}
 
-	rows := []PeerStatus{{
-		Type:                "peer",
-		Ifname:              "wg0",
-		Name:                "alice",
-		PublicKey:           "PK1",
-		Endpoint:            "[2001:db8::1]:51820",
-		AllowedIPs:          "10.0.0.2/32,10.0.0.3/32",
-		PersistentKeepalive: "25",
-		LatestHandshakeAge:  int64ptr(42),
-	}}
-	updateWireGuardMetrics(c, rows)
-
-	if got := testutil.ToFloat64(wgPeerEndpointMetric.WithLabelValues("wg0", "alice", "PK1", "2001:db8::1")); got != 1 {
-		t.Errorf("endpoint metric for IPv6 host = %v, want 1", got)
-	}
-	if n := testutil.CollectAndCount(wgPeerAllowedIPsMetric); n != 2 {
-		t.Errorf("allowed-ips series count = %d, want 2", n)
-	}
-	if got := testutil.ToFloat64(wgPeerKeepaliveMetric.WithLabelValues("wg0", "alice", "PK1")); got != 25 {
-		t.Errorf("keepalive = %v, want 25", got)
-	}
-	if got := testutil.ToFloat64(wgPeerHandshakeAgeMetric.WithLabelValues("wg0", "alice", "PK1")); got != 42 {
-		t.Errorf("handshake age = %v, want 42", got)
-	}
-}
-
-// TestUpdateWireGuardMetrics_InterfaceStatus verifies interface up/down status.
-func TestUpdateWireGuardMetrics_InterfaceStatus(t *testing.T) {
-	resetWireGuardMetrics()
-	c := &Client{}
-
-	rows := []PeerStatus{
-		{Type: "interface", Ifname: "wg0", Name: "WG Server", Status: "up"},
-		{Type: "interface", Ifname: "wg1", Name: "WG Backup", Status: "down"},
-	}
-	updateWireGuardMetrics(c, rows)
-
-	if got := testutil.ToFloat64(wgInterfaceStatusMetric.WithLabelValues("wg0", "WG Server")); got != 1 {
-		t.Errorf("wg0 status = %v, want 1", got)
-	}
-	if got := testutil.ToFloat64(wgInterfaceStatusMetric.WithLabelValues("wg1", "WG Backup")); got != 0 {
-		t.Errorf("wg1 status = %v, want 0", got)
-	}
-}
-
-// TestResetWireGuardMetrics verifies stale series are cleared on reset.
-func TestResetWireGuardMetrics(t *testing.T) {
-	resetWireGuardMetrics()
-	c := &Client{}
-	updateWireGuardMetrics(c, []PeerStatus{{
-		Type: "peer", Ifname: "wg0", Name: "bob", PublicKey: "PK2",
-		Endpoint: "1.2.3.4:51820", AllowedIPs: "10.0.0.5/32",
-	}})
-	if n := testutil.CollectAndCount(wgPeerTransferRxMetric); n != 1 {
-		t.Fatalf("rx series before reset = %d, want 1", n)
-	}
-	resetWireGuardMetrics()
-	if n := testutil.CollectAndCount(wgPeerTransferRxMetric); n != 0 {
-		t.Errorf("rx series after reset = %d, want 0", n)
-	}
-}
-
-// TestUpdateMetrics_FailureSetsDown verifies wireguard_up drops to 0 and the
-// error counter increments when the API call fails.
-func TestUpdateMetrics_FailureSetsDown(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+		if strings.Contains(r.URL.Path, "traffic") {
+			if n, err := testutil.GatherAndCount(prometheus.DefaultGatherer, "wireguard_peer_transfer_rx_bytes"); err != nil || n != 2 {
+				t.Errorf("scrape during update saw %d peers, want 2 (err: %v)", n, err)
+			}
+			_, _ = w.Write([]byte(trafficJSON))
+			return
+		}
+		_, _ = w.Write([]byte(`{"rows":[]}`))
 	}))
 	defer server.Close()
 
-	c := newTestClient(server)
-	wgUpMetric.Set(1)
-	before := testutil.ToFloat64(wgScrapeErrorsMetric)
-
-	if err := c.UpdateMetrics(); err == nil {
-		t.Fatal("expected error from failing API, got nil")
-	}
-	if got := testutil.ToFloat64(wgUpMetric); got != 0 {
-		t.Errorf("wireguard_up = %v, want 0 after failure", got)
-	}
-	if after := testutil.ToFloat64(wgScrapeErrorsMetric); after != before+1 {
-		t.Errorf("scrape errors = %v, want %v", after, before+1)
+	if err := newTestClient(server).UpdateMetrics(); err != nil {
+		t.Fatalf("UpdateMetrics: %v", err)
 	}
 }
 
-// TestInterfaceCollector verifies interface byte counters are emitted from the snapshot.
-func TestInterfaceCollector(t *testing.T) {
-	col := newInterfaceCollector()
-	col.Update(map[string]InterfaceData{
-		"lan": {Device: "igb0", Name: "LAN", BytesReceived: "1000", BytesTransmitted: "2000"},
-	})
-	if n := testutil.CollectAndCount(col); n != 2 {
-		t.Errorf("interface collector series = %d, want 2", n)
-	}
+// snapshotGatherer exposes the snapshot of rows and interfaces on a registry
+// that also fails on undescribed metrics.
+func snapshotGatherer(c *Client, rows []PeerStatus, interfaces map[string]InterfaceData) prometheus.Gatherer {
+	col := &snapshotCollector{}
+	col.Update(c.buildSnapshot(rows, interfaces))
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(col)
+	return reg
 }
 
-// TestInterfaceCollector_UnparsableBytes verifies an unparsable number drops only
-// that series, not the other direction or the rest of the scrape.
-func TestInterfaceCollector_UnparsableBytes(t *testing.T) {
-	col := newInterfaceCollector()
-	col.Update(map[string]InterfaceData{
+// TestBuildSnapshot_Peers verifies endpoint parsing, country lookup, and that
+// every allowed IP produces its own series.
+func TestBuildSnapshot_Peers(t *testing.T) {
+	rows := []PeerStatus{
+		{
+			Type: "peer", Ifname: "wg0", Name: "alice", PublicKey: "PK1",
+			Endpoint: "[2001:db8::1]:51820", AllowedIPs: "10.0.0.2/32,10.0.0.3/32",
+			PersistentKeepalive: "25", LatestHandshakeAge: int64ptr(42),
+		},
+		{Type: "peer", Ifname: "wg0", Name: "bob", PublicKey: "PK2", Endpoint: "8.8.8.8:51820", AllowedIPs: "(none)"},
+	}
+	assertExposed(t, snapshotGatherer(&Client{geoDB: newTestGeoDB(t)}, rows, nil), `
+wireguard_peer_allowed_ips{allowed_ip="10.0.0.2",interface="wg0",peer_name="alice",public_key="PK1"} 1
+wireguard_peer_allowed_ips{allowed_ip="10.0.0.3",interface="wg0",peer_name="alice",public_key="PK1"} 1
+wireguard_peer_country_code{country_code="DE",interface="wg0",peer_name="bob",public_key="PK2"} 1
+wireguard_peer_country_code{country_code="unknown",interface="wg0",peer_name="alice",public_key="PK1"} 1
+wireguard_peer_endpoint{endpoint_ip="2001:db8::1",interface="wg0",peer_name="alice",public_key="PK1"} 1
+wireguard_peer_endpoint{endpoint_ip="8.8.8.8",interface="wg0",peer_name="bob",public_key="PK2"} 1
+wireguard_peer_last_handshake_age_seconds{interface="wg0",peer_name="alice",public_key="PK1"} 42
+wireguard_peer_latest_handshake{interface="wg0",peer_name="alice",public_key="PK1"} 0
+wireguard_peer_latest_handshake{interface="wg0",peer_name="bob",public_key="PK2"} 0
+wireguard_peer_persistent_keepalive_seconds{interface="wg0",peer_name="alice",public_key="PK1"} 25
+wireguard_peer_persistent_keepalive_seconds{interface="wg0",peer_name="bob",public_key="PK2"} 0
+wireguard_peer_transfer_rx_bytes{interface="wg0",peer_name="alice",public_key="PK1"} 0
+wireguard_peer_transfer_rx_bytes{interface="wg0",peer_name="bob",public_key="PK2"} 0
+wireguard_peer_transfer_tx_bytes{interface="wg0",peer_name="alice",public_key="PK1"} 0
+wireguard_peer_transfer_tx_bytes{interface="wg0",peer_name="bob",public_key="PK2"} 0
+`)
+}
+
+// TestBuildSnapshot_Duplicates verifies repeated rows and allowed-ips keep the
+// first value instead of failing the whole Gather.
+func TestBuildSnapshot_Duplicates(t *testing.T) {
+	peer := PeerStatus{Type: "peer", Ifname: "wg0", Name: "alice", PublicKey: "PK1", AllowedIPs: "10.0.0.2/32,10.0.0.2/32", TransferRx: 1}
+	repeated := peer
+	repeated.TransferRx = 2
+	iface := PeerStatus{Type: "interface", Ifname: "wg0", Name: "WG Server", Status: "up"}
+
+	assertExposed(t, snapshotGatherer(&Client{}, []PeerStatus{peer, repeated, iface, iface}, nil), `
+wireguard_interface_status{interface="wg0",name="WG Server"} 1
+wireguard_peer_allowed_ips{allowed_ip="10.0.0.2",interface="wg0",peer_name="alice",public_key="PK1"} 1
+wireguard_peer_country_code{country_code="unknown",interface="wg0",peer_name="alice",public_key="PK1"} 1
+wireguard_peer_latest_handshake{interface="wg0",peer_name="alice",public_key="PK1"} 0
+wireguard_peer_persistent_keepalive_seconds{interface="wg0",peer_name="alice",public_key="PK1"} 0
+wireguard_peer_transfer_rx_bytes{interface="wg0",peer_name="alice",public_key="PK1"} 1
+wireguard_peer_transfer_tx_bytes{interface="wg0",peer_name="alice",public_key="PK1"} 0
+`)
+}
+
+// TestBuildSnapshot_UnparsableBytes verifies an unparsable number drops only that
+// series, not the other direction or the rest of the scrape.
+func TestBuildSnapshot_UnparsableBytes(t *testing.T) {
+	interfaces := map[string]InterfaceData{
 		"lan": {Device: "igb0", Name: "LAN", BytesReceived: "not-a-number", BytesTransmitted: "2000"},
 		"wan": {Device: "igb1", Name: "WAN", BytesReceived: "1000", BytesTransmitted: ""},
-	})
-	if n := testutil.CollectAndCount(col, "interfaces_transmitted_bytes_total"); n != 1 {
-		t.Errorf("transmitted series = %d, want 1", n)
 	}
-	if n := testutil.CollectAndCount(col, "interfaces_received_bytes_total"); n != 1 {
-		t.Errorf("received series = %d, want 1", n)
-	}
+	assertExposed(t, snapshotGatherer(&Client{}, nil, interfaces), `
+interfaces_received_bytes_total{device="igb1",interface="wan",name="WAN"} 1000
+interfaces_transmitted_bytes_total{device="igb0",interface="lan",name="LAN"} 2000
+`)
 }
