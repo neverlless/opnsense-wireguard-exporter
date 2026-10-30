@@ -1,15 +1,19 @@
-# The .dockerignore file excludes files from the container build process.
-#
-# https://docs.docker.com/engine/reference/builder/#dockerignore-file
+# Files the image build does not need.
+# https://docs.docker.com/build/concepts/context/#dockerignore-files
 
-# Exclude locally vendored dependencies.
-vendor/
-
-# Exclude "build-time" ignore files.
-.dockerignore
-.gcloudignore
-
-# Exclude git history and configuration.
+# Git and CI metadata.
+.git
+.github
 .gitignore
 
+# Local tooling state.
+.ansible
+.claude
+
+# Docker build inputs.
+.dockerignore
+Dockerfile
+
+# Docs and dashboards.
 README.md
+grafana
