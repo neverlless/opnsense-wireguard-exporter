@@ -1,4 +1,4 @@
-FROM golang:1.25.5 AS builder
+FROM golang:1.27.3 AS builder
 
 WORKDIR /src
 
@@ -10,7 +10,7 @@ RUN go get -v . \
        -ldflags "-s -w -X main.version=${VERSION}" \
        -o opnsense-wireguard-exporter
 
-FROM alpine:3.19.1
+FROM alpine:3.24.3
 
 RUN apk add --no-cache ca-certificates wget \
     && addgroup -S app && adduser -S -G app app
