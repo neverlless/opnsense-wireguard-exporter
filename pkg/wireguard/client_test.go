@@ -1,6 +1,7 @@
 package wireguard
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -15,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/oschwald/geoip2-golang/v2"
 )
 
 // newTestClient creates a Client wired to the given test server, without requiring
@@ -25,7 +28,78 @@ func newTestClient(server *httptest.Server) *Client {
 		APIKey:     "test-key",
 		APISecret:  "test-secret",
 		HTTPClient: server.Client(),
-		cache:      make(map[string]string),
+	}
+}
+
+func mmdbString(s string) []byte { return append([]byte{0x40 | byte(len(s))}, s...) }
+
+func mmdbUint16(v uint16) []byte { return []byte{0xA0 | 2, byte(v >> 8), byte(v)} }
+
+// mmdbMap encodes alternating key/value items.
+func mmdbMap(items ...[]byte) []byte {
+	return append([]byte{0xE0 | byte(len(items)/2)}, bytes.Join(items, nil)...)
+}
+
+// newTestGeoDB builds a one-node IPv4 MMDB in memory: addresses below 128.0.0.0
+// resolve to DE, the others to a record without country data.
+func newTestGeoDB(t *testing.T) *geoip2.Reader {
+	t.Helper()
+	const nodeCount, separatorSize = 1, 16
+
+	germany := mmdbMap(mmdbString("country"), mmdbMap(mmdbString("iso_code"), mmdbString("DE")))
+	empty := mmdbMap()
+	left := nodeCount + separatorSize
+	right := left + len(germany)
+
+	var db []byte
+	db = append(db, 0, 0, byte(left), 0, 0, byte(right)) // 24-bit records of the only node
+	db = append(db, make([]byte, separatorSize)...)
+	db = append(db, germany...)
+	db = append(db, empty...)
+	db = append(db, "\xab\xcd\xefMaxMind.com"...)
+	db = append(db, mmdbMap(
+		mmdbString("binary_format_major_version"), mmdbUint16(2),
+		mmdbString("binary_format_minor_version"), mmdbUint16(0),
+		mmdbString("database_type"), mmdbString("GeoLite2-Country"),
+		mmdbString("ip_version"), mmdbUint16(4),
+		mmdbString("node_count"), mmdbUint16(nodeCount),
+		mmdbString("record_size"), mmdbUint16(24),
+	)...)
+
+	reader, err := geoip2.OpenBytes(db)
+	if err != nil {
+		t.Fatalf("open test MMDB: %v", err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	return reader
+}
+
+func TestGetCountryCode(t *testing.T) {
+	geoDB := newTestGeoDB(t)
+	cases := []struct {
+		name    string
+		geoDB   *geoip2.Reader
+		ip      string
+		want    string
+		wantErr bool
+	}{
+		{name: "nil database", ip: "8.8.8.8", want: "unknown"},
+		{name: "nil database, invalid IP", ip: "nope", want: "unknown"},
+		{name: "known country", geoDB: geoDB, ip: "8.8.8.8", want: "DE"},
+		{name: "empty ISO code", geoDB: geoDB, ip: "200.1.1.1", want: "unknown"},
+		{name: "invalid IP", geoDB: geoDB, ip: "nope", want: "unknown", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Client{geoDB: tc.geoDB}
+			got, err := c.getCountryCode(tc.ip)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("getCountryCode error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("getCountryCode(%q) = %q, want %q", tc.ip, got, tc.want)
+			}
+		})
 	}
 }
 

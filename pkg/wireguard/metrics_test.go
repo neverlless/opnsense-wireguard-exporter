@@ -185,7 +185,7 @@ func TestUpdateMetrics_SecondRequestFails(t *testing.T) {
 // every allowed IP produces its own series, and keepalive/handshake-age metrics.
 func TestUpdatePeerMetrics_IPv6AndAllowedIPs(t *testing.T) {
 	resetWireGuardMetrics()
-	c := &Client{cache: make(map[string]string)}
+	c := &Client{}
 
 	rows := []PeerStatus{{
 		Type:                "peer",
@@ -216,7 +216,7 @@ func TestUpdatePeerMetrics_IPv6AndAllowedIPs(t *testing.T) {
 // TestUpdateWireGuardMetrics_InterfaceStatus verifies interface up/down status.
 func TestUpdateWireGuardMetrics_InterfaceStatus(t *testing.T) {
 	resetWireGuardMetrics()
-	c := &Client{cache: make(map[string]string)}
+	c := &Client{}
 
 	rows := []PeerStatus{
 		{Type: "interface", Ifname: "wg0", Name: "WG Server", Status: "up"},
@@ -235,7 +235,7 @@ func TestUpdateWireGuardMetrics_InterfaceStatus(t *testing.T) {
 // TestResetWireGuardMetrics verifies stale series are cleared on reset.
 func TestResetWireGuardMetrics(t *testing.T) {
 	resetWireGuardMetrics()
-	c := &Client{cache: make(map[string]string)}
+	c := &Client{}
 	updateWireGuardMetrics(c, []PeerStatus{{
 		Type: "peer", Ifname: "wg0", Name: "bob", PublicKey: "PK2",
 		Endpoint: "1.2.3.4:51820", AllowedIPs: "10.0.0.5/32",

@@ -8,14 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/oschwald/geoip2-golang"
+	"github.com/oschwald/geoip2-golang/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 )
@@ -40,8 +40,7 @@ type Client struct {
 	APIKey     string
 	APISecret  string
 	HTTPClient *http.Client
-	cache      map[string]string // Cache for country codes
-	geoDB      *geoip2.Reader    // MaxMind GeoIP2 database
+	geoDB      *geoip2.Reader // MaxMind GeoIP2 database
 }
 
 var (
@@ -148,7 +147,6 @@ func NewClient(cfg Config) (*Client, error) {
 		APIKey:     cfg.APIKey,
 		APISecret:  cfg.APISecret,
 		HTTPClient: client,
-		cache:      make(map[string]string),
 		geoDB:      geoDB,
 	}, nil
 }
@@ -317,26 +315,24 @@ func (c *Client) updatePeerMetrics(row PeerStatus) {
 }
 
 func (c *Client) getCountryCode(ip string) (string, error) {
-	if cc, found := c.cache[ip]; found {
-		return cc, nil
-	}
-
 	if c.geoDB == nil {
-		return "unknown", fmt.Errorf("GeoLite2 database not loaded")
+		return "unknown", nil
 	}
 
-	parsedIP := net.ParseIP(ip)
-	if parsedIP == nil {
-		return "unknown", fmt.Errorf("invalid IP address: %s", ip)
-	}
-
-	record, err := c.geoDB.Country(parsedIP)
+	addr, err := netip.ParseAddr(ip)
 	if err != nil {
-		return "unknown", fmt.Errorf("failed to get country code for IP %s: %v", ip, err)
+		return "unknown", fmt.Errorf("invalid IP address: %w", err)
 	}
 
-	c.cache[ip] = record.Country.IsoCode
-	return record.Country.IsoCode, nil
+	record, err := c.geoDB.Country(addr)
+	if err != nil {
+		return "unknown", fmt.Errorf("failed to get country code for IP %s: %w", ip, err)
+	}
+
+	if record.Country.ISOCode == "" {
+		return "unknown", nil
+	}
+	return record.Country.ISOCode, nil
 }
 
 func updateInterfaceMetrics(interfaces map[string]InterfaceData) {
