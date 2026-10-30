@@ -1,11 +1,11 @@
 package wireguard
 
 import (
+	"log/slog"
 	"strconv"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
-	log "github.com/sirupsen/logrus"
 )
 
 // interfaceCollector exposes per-interface byte totals as proper Prometheus
@@ -50,13 +50,13 @@ func (c *interfaceCollector) Collect(ch chan<- prometheus.Metric) {
 		if rx, err := strconv.ParseInt(data.BytesReceived, 10, 64); err == nil {
 			ch <- prometheus.MustNewConstMetric(c.rxDesc, prometheus.CounterValue, float64(rx), name, data.Device, data.Name)
 		} else {
-			log.WithError(err).Errorf("Failed to parse bytes received for interface %s", name)
+			slog.Error("Failed to parse bytes received", "interface", name, "error", err)
 		}
 
 		if tx, err := strconv.ParseInt(data.BytesTransmitted, 10, 64); err == nil {
 			ch <- prometheus.MustNewConstMetric(c.txDesc, prometheus.CounterValue, float64(tx), name, data.Device, data.Name)
 		} else {
-			log.WithError(err).Errorf("Failed to parse bytes transmitted for interface %s", name)
+			slog.Error("Failed to parse bytes transmitted", "interface", name, "error", err)
 		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/oschwald/geoip2-golang/v2"
 	"github.com/prometheus/client_golang/prometheus"
-	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -81,12 +81,6 @@ func init() {
 		wgLastScrapeTimestamp,
 		ifCollector,
 	)
-
-	log.SetFormatter(&log.TextFormatter{
-		FullTimestamp: true,
-		ForceColors:   true,
-	})
-	log.SetLevel(log.InfoLevel)
 }
 
 // newTLSConfig trusts cfg.CAFile when set, which always keeps verification on.
@@ -95,7 +89,7 @@ func init() {
 func newTLSConfig(cfg Config) (*tls.Config, error) {
 	if cfg.CAFile == "" {
 		if cfg.TLSInsecure {
-			log.Warn("TLS certificate verification is disabled for OPNsense API requests")
+			slog.Warn("TLS certificate verification is disabled for OPNsense API requests")
 		}
 		return &tls.Config{InsecureSkipVerify: cfg.TLSInsecure}, nil
 	}
@@ -138,7 +132,7 @@ func NewClient(cfg Config) (*Client, error) {
 	// exporter still serves all other metrics.
 	geoDB, err := geoip2.Open(cfg.GeoLiteDBPath)
 	if err != nil {
-		log.WithError(err).Warnf("Could not open GeoLite2 database at %s; country-code resolution disabled", cfg.GeoLiteDBPath)
+		slog.Warn("Could not open GeoLite2 database; country-code resolution disabled", "path", cfg.GeoLiteDBPath, "error", err)
 		geoDB = nil
 	}
 
@@ -189,22 +183,20 @@ func resetWireGuardMetrics() {
 }
 
 func (c *Client) UpdateMetrics() error {
-	log.Println("Updating metrics...")
+	slog.Debug("Updating metrics")
 
 	// Update WireGuard metrics
 	body, err := c.fetch("/api/wireguard/service/show")
 	if err != nil {
-		log.Errorf("Error fetching WireGuard configuration: %v", err)
 		c.recordFailure()
-		return err
+		return fmt.Errorf("failed to fetch WireGuard status: %w", err)
 	}
 
 	var wgStatus WireGuardStatus
 	err = json.Unmarshal(body, &wgStatus)
 	if err != nil {
-		log.Errorf("Failed to parse WireGuard config: %v", err)
 		c.recordFailure()
-		return fmt.Errorf("failed to parse WireGuard config: %v", err)
+		return fmt.Errorf("failed to parse WireGuard config: %w", err)
 	}
 
 	resetWireGuardMetrics()
@@ -213,41 +205,37 @@ func (c *Client) UpdateMetrics() error {
 	// Update interface metrics
 	body, err = c.fetch("/api/diagnostics/traffic/interface")
 	if err != nil {
-		log.Errorf("Error fetching interface traffic data: %v", err)
 		c.recordFailure()
-		return err
+		return fmt.Errorf("failed to fetch interface traffic data: %w", err)
 	}
 
 	var interfaceTraffic InterfaceTrafficStatus
 	err = json.Unmarshal(body, &interfaceTraffic)
 	if err != nil {
-		log.Errorf("Failed to parse interface traffic data: %v", err)
 		c.recordFailure()
-		return fmt.Errorf("failed to parse interface traffic data: %v", err)
+		return fmt.Errorf("failed to parse interface traffic data: %w", err)
 	}
 
 	updateInterfaceMetrics(interfaceTraffic.Interfaces)
 
 	c.recordSuccess()
-	log.Println("Metrics updated successfully.")
+	slog.Debug("Metrics updated successfully")
 	return nil
 }
 
 func (c *Client) fetch(endpoint string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, c.BaseURL+endpoint, nil)
 	if err != nil {
-		log.WithError(err).Error("Failed to create request")
-		return nil, err
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.SetBasicAuth(c.APIKey, c.APISecret)
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		log.WithError(err).Error("Failed to perform request")
-		return nil, err
+		return nil, fmt.Errorf("failed to perform request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
@@ -255,7 +243,7 @@ func (c *Client) fetch(endpoint string) ([]byte, error) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %v", err)
+		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	// Detect HTML responses (e.g. login/redirect page when using plain HTTP or with wrong credentials).
@@ -308,7 +296,7 @@ func (c *Client) updatePeerMetrics(row PeerStatus) {
 
 	countryCode, err := c.getCountryCode(endpointIP)
 	if err != nil {
-		log.WithError(err).Errorf("Failed to get country code for IP %s", endpointIP)
+		slog.Warn("Failed to get country code", "ip", endpointIP, "error", err)
 		countryCode = "unknown"
 	}
 	wgPeerCountryCodeMetric.WithLabelValues(row.Ifname, row.Name, row.PublicKey, countryCode).Set(1)

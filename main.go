@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"os"
@@ -14,7 +15,6 @@ import (
 	"opnsense-wireguard-exporter/pkg/wireguard"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -63,21 +63,24 @@ func parseUpdateInterval(raw string) (time.Duration, error) {
 }
 
 func main() {
-	log.Infof("Starting opnsense-wireguard-exporter %s", version)
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	slog.Info("Starting opnsense-wireguard-exporter", "version", version)
 
 	updateInterval, err := parseUpdateInterval(getEnvWithDefault("METRICS_UPDATE_INTERVAL_SECONDS", strconv.Itoa(defaultMetricsUpdateIntervalSeconds)))
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("Invalid configuration", "error", err)
+		os.Exit(1)
 	}
 
 	// Create a new OPNsense client
 	client, err := wireguard.NewClient(configFromEnv())
 	if err != nil {
-		log.Fatalf("Error creating OPNsense client: %v", err)
+		slog.Error("Error creating OPNsense client", "error", err)
+		os.Exit(1)
 	}
 	defer func() {
 		if cerr := client.Close(); cerr != nil {
-			log.WithError(cerr).Warn("Error closing client")
+			slog.Warn("Error closing client", "error", cerr)
 		}
 	}()
 
@@ -109,22 +112,23 @@ func main() {
 	}
 
 	go func() {
-		log.Infof("Beginning to serve on %s", listenAddress)
+		slog.Info("Beginning to serve", "address", listenAddress)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.WithError(err).Fatal("Server failed")
+			slog.Error("Server failed", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	// Block until a shutdown signal is received.
 	<-ctx.Done()
-	log.Info("Shutdown signal received, stopping server...")
+	slog.Info("Shutdown signal received, stopping server")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.WithError(err).Error("Graceful shutdown failed")
+		slog.Error("Graceful shutdown failed", "error", err)
 	}
-	log.Info("Server stopped")
+	slog.Info("Server stopped")
 }
 
 // runUpdateLoop refreshes metrics on a fixed interval until the context is cancelled.
@@ -134,7 +138,7 @@ func runUpdateLoop(ctx context.Context, client *wireguard.Client, interval time.
 
 	// Update immediately on startup rather than waiting for the first tick.
 	if err := client.UpdateMetrics(); err != nil {
-		log.WithError(err).Error("Error updating metrics")
+		slog.Error("Error updating metrics", "error", err)
 	}
 
 	for {
@@ -143,7 +147,7 @@ func runUpdateLoop(ctx context.Context, client *wireguard.Client, interval time.
 			return
 		case <-ticker.C:
 			if err := client.UpdateMetrics(); err != nil {
-				log.WithError(err).Error("Error updating metrics")
+				slog.Error("Error updating metrics", "error", err)
 			}
 		}
 	}
