@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -32,6 +34,19 @@ func getEnvWithDefault(key string, defaultValue string) string {
 	return defaultValue
 }
 
+// parseUpdateInterval converts METRICS_UPDATE_INTERVAL_SECONDS into a duration
+// that time.NewTicker accepts: positive and not overflowing time.Duration.
+func parseUpdateInterval(raw string) (time.Duration, error) {
+	seconds, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid METRICS_UPDATE_INTERVAL_SECONDS %q: %w", raw, err)
+	}
+	if seconds <= 0 || int64(seconds) > math.MaxInt64/int64(time.Second) {
+		return 0, fmt.Errorf("invalid METRICS_UPDATE_INTERVAL_SECONDS %q: must be a positive number of seconds", raw)
+	}
+	return time.Duration(seconds) * time.Second, nil
+}
+
 func main() {
 	log.Infof("Starting opnsense-wireguard-exporter %s", version)
 
@@ -56,12 +71,11 @@ func main() {
 	defer stop()
 
 	// Metrics update loop
-	updateIntervalSeconds := getEnvWithDefault("METRICS_UPDATE_INTERVAL_SECONDS", strconv.Itoa(defaultMetricsUpdateIntervalSeconds))
-	updateInterval, err := strconv.Atoi(updateIntervalSeconds)
+	updateInterval, err := parseUpdateInterval(getEnvWithDefault("METRICS_UPDATE_INTERVAL_SECONDS", strconv.Itoa(defaultMetricsUpdateIntervalSeconds)))
 	if err != nil {
-		log.Fatalf("Invalid METRICS_UPDATE_INTERVAL_SECONDS: %v", err)
+		log.Fatal(err)
 	}
-	go runUpdateLoop(ctx, client, time.Duration(updateInterval)*time.Second)
+	go runUpdateLoop(ctx, client, updateInterval)
 
 	// Set up the HTTP server with sane timeouts (mitigates Slowloris-style attacks).
 	listenAddress := getEnvWithDefault("LISTEN_ADDRESS", defaultListenAddress)
