@@ -45,6 +45,7 @@ func configFromEnv() wireguard.Config {
 		APISecret:     os.Getenv("OPNSENSE_API_SECRET"),
 		GeoLiteDBPath: getEnvWithDefault("GEOLITE_DB_PATH", defaultGeoLiteDBPath),
 		TLSInsecure:   getEnvWithDefault("OPNSENSE_TLS_INSECURE", "true") != "false",
+		CAFile:        os.Getenv("OPNSENSE_CA_FILE"),
 	}
 }
 

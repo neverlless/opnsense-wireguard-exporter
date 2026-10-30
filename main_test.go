@@ -26,8 +26,9 @@ func TestConfigFromEnv(t *testing.T) {
 
 	t.Setenv("OPNSENSE_TLS_INSECURE", "false")
 	t.Setenv("GEOLITE_DB_PATH", "/tmp/geo.mmdb")
+	t.Setenv("OPNSENSE_CA_FILE", "/tmp/ca.pem")
 	got = configFromEnv()
-	if got.TLSInsecure || got.GeoLiteDBPath != "/tmp/geo.mmdb" {
+	if got.TLSInsecure || got.GeoLiteDBPath != "/tmp/geo.mmdb" || got.CAFile != "/tmp/ca.pem" {
 		t.Errorf("configFromEnv() ignored overrides: %+v", got)
 	}
 }

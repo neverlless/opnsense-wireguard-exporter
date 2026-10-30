@@ -3,6 +3,7 @@ package wireguard
 import (
 	"bytes"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -88,6 +90,28 @@ func init() {
 	log.SetLevel(log.InfoLevel)
 }
 
+// newTLSConfig trusts cfg.CAFile when set, which always keeps verification on.
+// Otherwise cfg.TLSInsecure decides: OPNsense commonly ships with a self-signed
+// certificate.
+func newTLSConfig(cfg Config) (*tls.Config, error) {
+	if cfg.CAFile == "" {
+		if cfg.TLSInsecure {
+			log.Warn("TLS certificate verification is disabled for OPNsense API requests")
+		}
+		return &tls.Config{InsecureSkipVerify: cfg.TLSInsecure}, nil
+	}
+
+	pemData, err := os.ReadFile(cfg.CAFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CA file: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemData) {
+		return nil, fmt.Errorf("no valid PEM certificates in CA file %s", cfg.CAFile)
+	}
+	return &tls.Config{RootCAs: pool}, nil
+}
+
 // NewClient validates cfg and builds a client. It does not contact OPNsense.
 func NewClient(cfg Config) (*Client, error) {
 	if cfg.APIKey == "" || cfg.APISecret == "" {
@@ -98,10 +122,12 @@ func NewClient(cfg Config) (*Client, error) {
 		return nil, errors.New("OPNsense base URL must be an http or https URL with a host")
 	}
 
-	// OPNsense commonly ships with a self-signed certificate, so the caller may
-	// disable certificate verification.
+	tlsConfig, err := newTLSConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: cfg.TLSInsecure}
+	transport.TLSClientConfig = tlsConfig
 
 	client := &http.Client{
 		Timeout:   defaultHTTPClientTimeout,
