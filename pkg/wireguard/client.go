@@ -21,10 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-const (
-	timeLayout               = "2006-01-02 15:04:05-07:00"
-	defaultHTTPClientTimeout = 10 * time.Second
-)
+const defaultHTTPClientTimeout = 10 * time.Second
 
 // Config holds everything NewClient needs.
 type Config struct {
