@@ -1,10 +1,23 @@
 package wireguard
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/oschwald/geoip2-golang/v2"
 )
 
 // newTestClient creates a Client wired to the given test server, without requiring
@@ -15,7 +28,199 @@ func newTestClient(server *httptest.Server) *Client {
 		APIKey:     "test-key",
 		APISecret:  "test-secret",
 		HTTPClient: server.Client(),
-		cache:      make(map[string]string),
+	}
+}
+
+func mmdbString(s string) []byte { return append([]byte{0x40 | byte(len(s))}, s...) }
+
+func mmdbUint16(v uint16) []byte { return []byte{0xA0 | 2, byte(v >> 8), byte(v)} }
+
+// mmdbMap encodes alternating key/value items.
+func mmdbMap(items ...[]byte) []byte {
+	return append([]byte{0xE0 | byte(len(items)/2)}, bytes.Join(items, nil)...)
+}
+
+// newTestGeoDB builds a one-node IPv4 MMDB in memory: addresses below 128.0.0.0
+// resolve to DE, the others to a record without country data.
+func newTestGeoDB(t *testing.T) *geoip2.Reader {
+	t.Helper()
+	const nodeCount, separatorSize = 1, 16
+
+	germany := mmdbMap(mmdbString("country"), mmdbMap(mmdbString("iso_code"), mmdbString("DE")))
+	empty := mmdbMap()
+	left := nodeCount + separatorSize
+	right := left + len(germany)
+
+	var db []byte
+	db = append(db, 0, 0, byte(left), 0, 0, byte(right)) // 24-bit records of the only node
+	db = append(db, make([]byte, separatorSize)...)
+	db = append(db, germany...)
+	db = append(db, empty...)
+	db = append(db, "\xab\xcd\xefMaxMind.com"...)
+	db = append(db, mmdbMap(
+		mmdbString("binary_format_major_version"), mmdbUint16(2),
+		mmdbString("binary_format_minor_version"), mmdbUint16(0),
+		mmdbString("database_type"), mmdbString("GeoLite2-Country"),
+		mmdbString("ip_version"), mmdbUint16(4),
+		mmdbString("node_count"), mmdbUint16(nodeCount),
+		mmdbString("record_size"), mmdbUint16(24),
+	)...)
+
+	reader, err := geoip2.OpenBytes(db)
+	if err != nil {
+		t.Fatalf("open test MMDB: %v", err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	return reader
+}
+
+func TestGetCountryCode(t *testing.T) {
+	geoDB := newTestGeoDB(t)
+	cases := []struct {
+		name    string
+		geoDB   *geoip2.Reader
+		ip      string
+		want    string
+		wantErr bool
+	}{
+		{name: "nil database", ip: "8.8.8.8", want: "unknown"},
+		{name: "nil database, invalid IP", ip: "nope", want: "unknown"},
+		{name: "known country", geoDB: geoDB, ip: "8.8.8.8", want: "DE"},
+		{name: "empty ISO code", geoDB: geoDB, ip: "200.1.1.1", want: "unknown"},
+		{name: "invalid IP", geoDB: geoDB, ip: "nope", want: "unknown", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Client{geoDB: tc.geoDB}
+			got, err := c.getCountryCode(tc.ip)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("getCountryCode error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("getCountryCode(%q) = %q, want %q", tc.ip, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewClient_Validation(t *testing.T) {
+	valid := Config{BaseURL: "https://fw.example", APIKey: "k", APISecret: "s"}
+	cases := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr bool
+	}{
+		{name: "valid https", mutate: func(*Config) {}},
+		{name: "valid http with port", mutate: func(c *Config) { c.BaseURL = "http://10.0.0.1:8443" }},
+		{name: "missing key", mutate: func(c *Config) { c.APIKey = "" }, wantErr: true},
+		{name: "missing secret", mutate: func(c *Config) { c.APISecret = "" }, wantErr: true},
+		{name: "missing url", mutate: func(c *Config) { c.BaseURL = "" }, wantErr: true},
+		{name: "wrong scheme", mutate: func(c *Config) { c.BaseURL = "ftp://fw.example" }, wantErr: true},
+		{name: "no scheme", mutate: func(c *Config) { c.BaseURL = "fw.example" }, wantErr: true},
+		{name: "no host", mutate: func(c *Config) { c.BaseURL = "https://" }, wantErr: true},
+		{name: "port only", mutate: func(c *Config) { c.BaseURL = "https://:443" }, wantErr: true},
+		{name: "unparsable", mutate: func(c *Config) { c.BaseURL = "https://fw.example:port" }, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := valid
+			tc.mutate(&cfg)
+			client, err := NewClient(cfg)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("NewClient error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if client != nil {
+				_ = client.Close()
+			}
+		})
+	}
+}
+
+func TestNewClient_TrimsTrailingSlash(t *testing.T) {
+	client, err := NewClient(Config{BaseURL: "https://fw.example//", APIKey: "k", APISecret: "s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.BaseURL != "https://fw.example" {
+		t.Errorf("BaseURL = %q", client.BaseURL)
+	}
+}
+
+// writeCertPEM stores der as a PEM file and returns its path.
+func writeCertPEM(t *testing.T, der []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ca.pem")
+	data := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// otherCADER returns a self-signed certificate unrelated to the httptest server.
+func otherCADER(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "other CA"},
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der
+}
+
+// TestNewClient_TLS verifies against a real TLS server that the CA file wins
+// over TLSInsecure, in both directions.
+func TestNewClient_TLS(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	cases := []struct {
+		name     string
+		insecure bool
+		caFile   string
+		wantErr  bool
+	}{
+		{name: "insecure skips verification", insecure: true},
+		{name: "secure without CA rejects server", wantErr: true},
+		{name: "server CA is trusted", caFile: writeCertPEM(t, server.Certificate().Raw)},
+		{name: "CA file enables verification despite insecure", insecure: true, caFile: writeCertPEM(t, otherCADER(t)), wantErr: true},
+		{name: "server CA with insecure", insecure: true, caFile: writeCertPEM(t, server.Certificate().Raw)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := NewClient(Config{BaseURL: server.URL, APIKey: "k", APISecret: "s", TLSInsecure: tc.insecure, CAFile: tc.caFile})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.HTTPClient.CloseIdleConnections()
+			if _, err := client.fetch(t.Context(), "/"); (err != nil) != tc.wantErr {
+				t.Errorf("fetch error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestNewClient_BadCAFile(t *testing.T) {
+	invalid := filepath.Join(t.TempDir(), "invalid.pem")
+	if err := os.WriteFile(invalid, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{invalid, filepath.Join(t.TempDir(), "missing.pem")} {
+		if _, err := NewClient(Config{BaseURL: "https://fw.example", APIKey: "k", APISecret: "s", TLSInsecure: true, CAFile: path}); err == nil {
+			t.Errorf("NewClient with CA file %s: expected error", path)
+		}
 	}
 }
 
@@ -30,7 +235,7 @@ func TestFetch_HTMLResponse(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server)
-	_, err := client.fetch("/api/wireguard/service/show")
+	_, err := client.fetch(t.Context(), "/api/wireguard/service/show")
 	if err == nil {
 		t.Fatal("expected an error for HTML response, got nil")
 	}
@@ -49,7 +254,7 @@ func TestFetch_HTMLResponseWithLeadingWhitespace(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server)
-	_, err := client.fetch("/api/wireguard/service/show")
+	_, err := client.fetch(t.Context(), "/api/wireguard/service/show")
 	if err == nil {
 		t.Fatal("expected an error for HTML response with leading whitespace, got nil")
 	}
@@ -66,7 +271,7 @@ func TestFetch_NonOKStatus(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server)
-	_, err := client.fetch("/api/wireguard/service/show")
+	_, err := client.fetch(t.Context(), "/api/wireguard/service/show")
 	if err == nil {
 		t.Fatal("expected an error for non-200 status, got nil")
 	}
@@ -85,7 +290,7 @@ func TestFetch_ValidJSON(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server)
-	body, err := client.fetch("/api/wireguard/service/show")
+	body, err := client.fetch(t.Context(), "/api/wireguard/service/show")
 	if err != nil {
 		t.Fatalf("expected no error for valid JSON response, got: %v", err)
 	}

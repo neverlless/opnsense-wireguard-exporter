@@ -1,14 +1,10 @@
 package wireguard
 
 type WireGuardStatus struct {
-	Total    int          `json:"total"`
-	RowCount int          `json:"rowCount"`
-	Current  int          `json:"current"`
-	Rows     []PeerStatus `json:"rows"`
+	Rows []PeerStatus `json:"rows"`
 }
 
 type PeerStatus struct {
-	If                  string `json:"if"`
 	Type                string `json:"type"`
 	PublicKey           string `json:"public-key"`
 	Endpoint            string `json:"endpoint"`
@@ -18,7 +14,6 @@ type PeerStatus struct {
 	TransferRx          int64  `json:"transfer-rx"`
 	TransferTx          int64  `json:"transfer-tx"`
 	PersistentKeepalive string `json:"persistent-keepalive"`
-	PeerStatus          string `json:"peer-status"`
 	Status              string `json:"status"`
 	Name                string `json:"name"`
 	Ifname              string `json:"ifname"`
@@ -26,7 +21,6 @@ type PeerStatus struct {
 
 type InterfaceTrafficStatus struct {
 	Interfaces map[string]InterfaceData `json:"interfaces"`
-	Time       float64                  `json:"time"`
 }
 
 type InterfaceData struct {
