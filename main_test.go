@@ -1,11 +1,46 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"opnsense-wireguard-exporter/pkg/wireguard"
 )
+
+// TestRunUpdateLoop_CancelAbortsInFlightUpdate verifies a blocked API request
+// does not delay shutdown.
+func TestRunUpdateLoop_CancelAbortsInFlightUpdate(t *testing.T) {
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client, err := wireguard.NewClient(wireguard.Config{BaseURL: server.URL, APIKey: "k", APISecret: "s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runUpdateLoop(ctx, client, time.Hour)
+	}()
+
+	<-started
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runUpdateLoop did not return after cancel")
+	}
+}
 
 func TestConfigFromEnv(t *testing.T) {
 	t.Setenv("OPNSENSE_BASE_URL", "https://fw.example")

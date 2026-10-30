@@ -205,7 +205,7 @@ func TestNewClient_TLS(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer client.HTTPClient.CloseIdleConnections()
-			if _, err := client.fetch("/"); (err != nil) != tc.wantErr {
+			if _, err := client.fetch(t.Context(), "/"); (err != nil) != tc.wantErr {
 				t.Errorf("fetch error = %v, wantErr %v", err, tc.wantErr)
 			}
 		})
@@ -235,7 +235,7 @@ func TestFetch_HTMLResponse(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server)
-	_, err := client.fetch("/api/wireguard/service/show")
+	_, err := client.fetch(t.Context(), "/api/wireguard/service/show")
 	if err == nil {
 		t.Fatal("expected an error for HTML response, got nil")
 	}
@@ -254,7 +254,7 @@ func TestFetch_HTMLResponseWithLeadingWhitespace(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server)
-	_, err := client.fetch("/api/wireguard/service/show")
+	_, err := client.fetch(t.Context(), "/api/wireguard/service/show")
 	if err == nil {
 		t.Fatal("expected an error for HTML response with leading whitespace, got nil")
 	}
@@ -271,7 +271,7 @@ func TestFetch_NonOKStatus(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server)
-	_, err := client.fetch("/api/wireguard/service/show")
+	_, err := client.fetch(t.Context(), "/api/wireguard/service/show")
 	if err == nil {
 		t.Fatal("expected an error for non-200 status, got nil")
 	}
@@ -290,7 +290,7 @@ func TestFetch_ValidJSON(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server)
-	body, err := client.fetch("/api/wireguard/service/show")
+	body, err := client.fetch(t.Context(), "/api/wireguard/service/show")
 	if err != nil {
 		t.Fatalf("expected no error for valid JSON response, got: %v", err)
 	}

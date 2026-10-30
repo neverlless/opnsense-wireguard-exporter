@@ -2,6 +2,7 @@ package wireguard
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -143,10 +144,12 @@ func (c *Client) recordFailure() {
 	wgScrapeErrorsMetric.Inc()
 }
 
-func (c *Client) UpdateMetrics() error {
+// UpdateMetrics refreshes the exposed snapshot. The returned error is for the
+// caller to log.
+func (c *Client) UpdateMetrics(ctx context.Context) error {
 	slog.Debug("Updating metrics")
 
-	snapshot, err := c.scrape()
+	snapshot, err := c.scrape(ctx)
 	if err != nil {
 		c.recordFailure()
 		return err
@@ -160,8 +163,8 @@ func (c *Client) UpdateMetrics() error {
 
 // scrape queries both API endpoints. Any failure discards the whole cycle, so
 // the collector keeps its last complete snapshot.
-func (c *Client) scrape() ([]prometheus.Metric, error) {
-	body, err := c.fetch("/api/wireguard/service/show")
+func (c *Client) scrape(ctx context.Context) ([]prometheus.Metric, error) {
+	body, err := c.fetch(ctx, "/api/wireguard/service/show")
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch WireGuard status: %w", err)
 	}
@@ -171,7 +174,7 @@ func (c *Client) scrape() ([]prometheus.Metric, error) {
 		return nil, fmt.Errorf("failed to parse WireGuard config: %w", err)
 	}
 
-	body, err = c.fetch("/api/diagnostics/traffic/interface")
+	body, err = c.fetch(ctx, "/api/diagnostics/traffic/interface")
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch interface traffic data: %w", err)
 	}
@@ -184,8 +187,8 @@ func (c *Client) scrape() ([]prometheus.Metric, error) {
 	return c.buildSnapshot(wgStatus.Rows, interfaceTraffic.Interfaces), nil
 }
 
-func (c *Client) fetch(endpoint string) ([]byte, error) {
-	req, err := http.NewRequest(http.MethodGet, c.BaseURL+endpoint, nil)
+func (c *Client) fetch(ctx context.Context, endpoint string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

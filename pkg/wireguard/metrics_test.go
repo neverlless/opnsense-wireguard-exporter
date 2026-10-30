@@ -149,7 +149,7 @@ wireguard_peer_transfer_tx_bytes_total{interface="wg0",peer_name="bob",public_ke
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newTestClient(newAPIServer(t, tc.wgBody, tc.trafficBody))
-			if err := c.UpdateMetrics(); err != nil {
+			if err := c.UpdateMetrics(t.Context()); err != nil {
 				t.Fatalf("UpdateMetrics: %v", err)
 			}
 			assertExposed(t, prometheus.DefaultGatherer, tc.want)
@@ -188,12 +188,12 @@ wireguard_interface_status{interface="wg0",name="WG Server"} 1
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := newTestClient(newAPIServer(t, goodWG, trafficJSON)).UpdateMetrics(); err != nil {
+			if err := newTestClient(newAPIServer(t, goodWG, trafficJSON)).UpdateMetrics(t.Context()); err != nil {
 				t.Fatalf("UpdateMetrics: %v", err)
 			}
 			before := testutil.ToFloat64(wgScrapeErrorsMetric)
 
-			if err := newTestClient(newAPIServer(t, tc.wgBody, tc.trafficBody)).UpdateMetrics(); err == nil {
+			if err := newTestClient(newAPIServer(t, tc.wgBody, tc.trafficBody)).UpdateMetrics(t.Context()); err == nil {
 				t.Fatal("expected error, got nil")
 			}
 			if got := testutil.ToFloat64(wgUpMetric); got != 0 {
@@ -210,7 +210,7 @@ wireguard_interface_status{interface="wg0",name="WG Server"} 1
 // TestUpdateMetrics_NoScrapeGap scrapes while the second request is in flight:
 // the previous snapshot must still be fully visible at that point.
 func TestUpdateMetrics_NoScrapeGap(t *testing.T) {
-	if err := newTestClient(newAPIServer(t, wgShowJSON, trafficJSON)).UpdateMetrics(); err != nil {
+	if err := newTestClient(newAPIServer(t, wgShowJSON, trafficJSON)).UpdateMetrics(t.Context()); err != nil {
 		t.Fatalf("UpdateMetrics: %v", err)
 	}
 
@@ -226,7 +226,7 @@ func TestUpdateMetrics_NoScrapeGap(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := newTestClient(server).UpdateMetrics(); err != nil {
+	if err := newTestClient(server).UpdateMetrics(t.Context()); err != nil {
 		t.Fatalf("UpdateMetrics: %v", err)
 	}
 }

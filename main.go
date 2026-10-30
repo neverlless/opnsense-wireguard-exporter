@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -89,7 +90,8 @@ func main() {
 	defer stop()
 
 	// Metrics update loop
-	go runUpdateLoop(ctx, client, updateInterval)
+	var updateLoop sync.WaitGroup
+	updateLoop.Go(func() { runUpdateLoop(ctx, client, updateInterval) })
 
 	// Set up the HTTP server with sane timeouts (mitigates Slowloris-style attacks).
 	listenAddress := getEnvWithDefault("LISTEN_ADDRESS", defaultListenAddress)
@@ -128,6 +130,9 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Error("Graceful shutdown failed", "error", err)
 	}
+
+	// The deferred client.Close must not run while a GeoIP lookup is in progress.
+	updateLoop.Wait()
 	slog.Info("Server stopped")
 }
 
@@ -137,18 +142,20 @@ func runUpdateLoop(ctx context.Context, client *wireguard.Client, interval time.
 	defer ticker.Stop()
 
 	// Update immediately on startup rather than waiting for the first tick.
-	if err := client.UpdateMetrics(); err != nil {
-		slog.Error("Error updating metrics", "error", err)
+	update := func() {
+		// An update aborted by shutdown is not a failed cycle worth reporting.
+		if err := client.UpdateMetrics(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("Error updating metrics", "error", err)
+		}
 	}
+	update()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := client.UpdateMetrics(); err != nil {
-				slog.Error("Error updating metrics", "error", err)
-			}
+			update()
 		}
 	}
 }
