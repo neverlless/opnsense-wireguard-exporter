@@ -216,3 +216,7 @@ go test -race ./...
 - Metrics for general traffic through the firewall
 - Metrics for local area network interfaces
 - Metrics for packets blocked by the firewall
+
+## License
+
+[MIT](LICENSE). The GeoLite2 database shipped in the image is covered by MaxMind's own terms.
