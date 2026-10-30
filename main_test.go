@@ -3,7 +3,34 @@ package main
 import (
 	"testing"
 	"time"
+
+	"opnsense-wireguard-exporter/pkg/wireguard"
 )
+
+func TestConfigFromEnv(t *testing.T) {
+	t.Setenv("OPNSENSE_BASE_URL", "https://fw.example")
+	t.Setenv("OPNSENSE_API_KEY", "key")
+	t.Setenv("OPNSENSE_API_SECRET", "secret")
+
+	got := configFromEnv()
+	want := wireguard.Config{
+		BaseURL:       "https://fw.example",
+		APIKey:        "key",
+		APISecret:     "secret",
+		GeoLiteDBPath: defaultGeoLiteDBPath,
+		TLSInsecure:   true,
+	}
+	if got != want {
+		t.Errorf("configFromEnv() = %+v, want %+v", got, want)
+	}
+
+	t.Setenv("OPNSENSE_TLS_INSECURE", "false")
+	t.Setenv("GEOLITE_DB_PATH", "/tmp/geo.mmdb")
+	got = configFromEnv()
+	if got.TLSInsecure || got.GeoLiteDBPath != "/tmp/geo.mmdb" {
+		t.Errorf("configFromEnv() ignored overrides: %+v", got)
+	}
+}
 
 func TestParseUpdateInterval(t *testing.T) {
 	cases := []struct {

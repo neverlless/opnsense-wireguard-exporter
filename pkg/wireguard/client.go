@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"os"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/oschwald/geoip2-golang"
@@ -19,8 +21,17 @@ import (
 const (
 	timeLayout               = "2006-01-02 15:04:05-07:00"
 	defaultHTTPClientTimeout = 10 * time.Second
-	defaultGeoLiteDBPath     = "/opt/GeoLite2-Country.mmdb" // Default path to the MaxMind database
 )
+
+// Config holds everything NewClient needs.
+type Config struct {
+	BaseURL       string
+	APIKey        string
+	APISecret     string
+	GeoLiteDBPath string
+	TLSInsecure   bool
+	CAFile        string
+}
 
 type Client struct {
 	BaseURL    string
@@ -77,39 +88,39 @@ func init() {
 	log.SetLevel(log.InfoLevel)
 }
 
-func NewClient(apiKey, apiSecret, baseURL string) (*Client, error) {
-	// OPNsense commonly ships with a self-signed certificate, so certificate
-	// verification is disabled by default. Set OPNSENSE_TLS_INSECURE=false to
-	// enforce verification when a trusted certificate is in use.
-	insecure := getEnvWithDefault("OPNSENSE_TLS_INSECURE", "true") != "false"
-	if !insecure {
-		log.Info("TLS certificate verification is enabled for OPNsense API requests")
+// NewClient validates cfg and builds a client. It does not contact OPNsense.
+func NewClient(cfg Config) (*Client, error) {
+	if cfg.APIKey == "" || cfg.APISecret == "" {
+		return nil, errors.New("OPNsense API key and secret are required")
 	}
-	tlsConfig := &tls.Config{InsecureSkipVerify: insecure}
+	u, err := url.Parse(cfg.BaseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return nil, errors.New("OPNsense base URL must be an http or https URL with a host")
+	}
+
+	// OPNsense commonly ships with a self-signed certificate, so the caller may
+	// disable certificate verification.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: cfg.TLSInsecure}
 
 	client := &http.Client{
-		Timeout: defaultHTTPClientTimeout,
-		Transport: &http.Transport{
-			TLSClientConfig: tlsConfig,
-		},
+		Timeout:   defaultHTTPClientTimeout,
+		Transport: transport,
 	}
 
 	// The GeoLite2 database is optional: if it cannot be opened, country-code
 	// resolution is disabled (peers report country_code="unknown") but the
 	// exporter still serves all other metrics.
-	geoLiteDBPath := getEnvWithDefault("GEOLITE_DB_PATH", defaultGeoLiteDBPath)
-	geoDB, err := geoip2.Open(geoLiteDBPath)
+	geoDB, err := geoip2.Open(cfg.GeoLiteDBPath)
 	if err != nil {
-		log.WithError(err).Warnf("Could not open GeoLite2 database at %s; country-code resolution disabled", geoLiteDBPath)
+		log.WithError(err).Warnf("Could not open GeoLite2 database at %s; country-code resolution disabled", cfg.GeoLiteDBPath)
 		geoDB = nil
 	}
 
-	log.WithFields(log.Fields{"baseURL": baseURL}).Info("Connected to OPNsense")
-
 	return &Client{
-		BaseURL:    baseURL,
-		APIKey:     apiKey,
-		APISecret:  apiSecret,
+		BaseURL:    strings.TrimRight(cfg.BaseURL, "/"),
+		APIKey:     cfg.APIKey,
+		APISecret:  cfg.APISecret,
 		HTTPClient: client,
 		cache:      make(map[string]string),
 		geoDB:      geoDB,
@@ -306,11 +317,4 @@ func updateInterfaceMetrics(interfaces map[string]InterfaceData) {
 	// Interface byte counters are exposed as proper Prometheus counters through
 	// ifCollector, which emits them at scrape time from this snapshot.
 	ifCollector.Update(interfaces)
-}
-
-func getEnvWithDefault(key string, defaultValue string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
-	}
-	return defaultValue
 }

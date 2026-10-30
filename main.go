@@ -21,6 +21,7 @@ const (
 	defaultMetricsUpdateIntervalSeconds = 30         // Default interval for metrics update in seconds
 	defaultListenAddress                = ":9486"    // Default listen address for the server
 	metricsEndpointPath                 = "/metrics" // Default metrics endpoint path
+	defaultGeoLiteDBPath                = "/opt/GeoLite2-Country.mmdb"
 	shutdownTimeout                     = 10 * time.Second
 )
 
@@ -32,6 +33,19 @@ func getEnvWithDefault(key string, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+// configFromEnv builds the client configuration. TLS verification stays off
+// unless OPNSENSE_TLS_INSECURE=false, because OPNsense commonly ships with a
+// self-signed certificate.
+func configFromEnv() wireguard.Config {
+	return wireguard.Config{
+		BaseURL:       os.Getenv("OPNSENSE_BASE_URL"),
+		APIKey:        os.Getenv("OPNSENSE_API_KEY"),
+		APISecret:     os.Getenv("OPNSENSE_API_SECRET"),
+		GeoLiteDBPath: getEnvWithDefault("GEOLITE_DB_PATH", defaultGeoLiteDBPath),
+		TLSInsecure:   getEnvWithDefault("OPNSENSE_TLS_INSECURE", "true") != "false",
+	}
 }
 
 // parseUpdateInterval converts METRICS_UPDATE_INTERVAL_SECONDS into a duration
@@ -50,13 +64,13 @@ func parseUpdateInterval(raw string) (time.Duration, error) {
 func main() {
 	log.Infof("Starting opnsense-wireguard-exporter %s", version)
 
-	// Client configuration
-	apiKey := os.Getenv("OPNSENSE_API_KEY")
-	apiSecret := os.Getenv("OPNSENSE_API_SECRET")
-	baseURL := os.Getenv("OPNSENSE_BASE_URL")
+	updateInterval, err := parseUpdateInterval(getEnvWithDefault("METRICS_UPDATE_INTERVAL_SECONDS", strconv.Itoa(defaultMetricsUpdateIntervalSeconds)))
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// Create a new OPNsense client
-	client, err := wireguard.NewClient(apiKey, apiSecret, baseURL)
+	client, err := wireguard.NewClient(configFromEnv())
 	if err != nil {
 		log.Fatalf("Error creating OPNsense client: %v", err)
 	}
@@ -71,10 +85,6 @@ func main() {
 	defer stop()
 
 	// Metrics update loop
-	updateInterval, err := parseUpdateInterval(getEnvWithDefault("METRICS_UPDATE_INTERVAL_SECONDS", strconv.Itoa(defaultMetricsUpdateIntervalSeconds)))
-	if err != nil {
-		log.Fatal(err)
-	}
 	go runUpdateLoop(ctx, client, updateInterval)
 
 	// Set up the HTTP server with sane timeouts (mitigates Slowloris-style attacks).
